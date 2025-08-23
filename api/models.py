@@ -8,7 +8,7 @@ import uuid
 class User(AbstractUser):
     """Extended User model for the dating app"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    profile_photo = models.ImageField(upload_to='profile_photos/', null=True, blank=True)
+    profile_photo = models.URLField(max_length=500, null=True, blank=True)
     age = models.PositiveIntegerField(null=True, blank=True)
     date_of_birth = models.DateField(null=True, blank=True)
     height = models.PositiveIntegerField(help_text="Height in cm", null=True, blank=True)
@@ -53,15 +53,41 @@ class Question(models.Model):
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    question_name = models.CharField(max_length=200, blank=True, help_text="Short name/identifier for the question")
+    question_number = models.PositiveIntegerField(null=True, blank=True, help_text="Question number for ordering")
+    group_name = models.CharField(max_length=200, blank=True, help_text="Group/category name for the question")
     text = models.TextField()
     tags = models.ManyToManyField(Tag, related_name='questions')
     question_type = models.CharField(max_length=20, choices=QUESTION_TYPE_CHOICES, default='unanswered')
     is_required_for_match = models.BooleanField(default=False)
+    is_approved = models.BooleanField(default=False, help_text="Whether the question is approved for use")
+    skip_me = models.BooleanField(default=False, help_text="Whether to skip asking about me")
+    skip_looking_for = models.BooleanField(default=False, help_text="Whether to skip asking about what I'm looking for")
+    open_to_all_me = models.BooleanField(default=False, help_text="Whether I'm open to all options")
+    open_to_all_looking_for = models.BooleanField(default=False, help_text="Whether I'm open to all options in a partner")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
     def __str__(self):
         return self.text[:50]
+
+
+class QuestionAnswer(models.Model):
+    """Answers for questions"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name='answers')
+    value = models.CharField(max_length=10, help_text="Answer value (1, 2, 3, 4, 5)")
+    answer_text = models.CharField(max_length=500, help_text="Answer text")
+    order = models.PositiveIntegerField(default=0, help_text="Order of the answer")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = ['question', 'value']
+        ordering = ['order']
+    
+    def __str__(self):
+        return f"{self.question.text[:30]} - {self.value}: {self.answer_text[:30]}"
 
 
 class UserAnswer(models.Model):

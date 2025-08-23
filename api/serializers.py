@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from .models import (
     User, Tag, Question, UserAnswer, Compatibility, 
-    UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag
+    UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, QuestionAnswer
 )
 
 
@@ -34,14 +34,22 @@ class UserSerializer(serializers.ModelSerializer):
             return None
 
 
+class QuestionAnswerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuestionAnswer
+        fields = ['id', 'value', 'answer_text', 'order', 'created_at', 'updated_at']
+
+
 class QuestionSerializer(serializers.ModelSerializer):
     tags = TagSerializer(many=True, read_only=True)
+    answers = QuestionAnswerSerializer(many=True, read_only=True)
     
     class Meta:
         model = Question
         fields = [
-            'id', 'text', 'tags', 'question_type', 'is_required_for_match',
-            'created_at', 'updated_at'
+            'id', 'question_name', 'question_number', 'group_name', 'text', 'tags', 'answers',
+            'question_type', 'is_required_for_match', 'is_approved', 'skip_me', 'skip_looking_for',
+            'open_to_all_me', 'open_to_all_looking_for', 'created_at', 'updated_at'
         ]
 
 
