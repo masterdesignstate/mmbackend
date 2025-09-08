@@ -24,7 +24,7 @@ class UserViewSet(viewsets.ModelViewSet):
     serializer_class = UserSerializer
     permission_classes = [permissions.AllowAny]  # Changed for testing
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
-    search_fields = ['username', 'first_name', 'last_name', 'city', 'bio']
+    search_fields = ['username', 'first_name', 'last_name', 'from_location', 'live', 'bio']
     ordering_fields = ['age', 'height', 'questions_answered_count', 'last_seen']
     ordering = ['-last_seen']
 
@@ -48,6 +48,17 @@ class UserViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def me(self, request):
         """Get current user's profile"""
+        print(f"🔍 /users/me/ called")
+        print(f"   User authenticated: {request.user.is_authenticated}")
+        print(f"   User: {request.user}")
+        print(f"   Session key: {request.session.session_key}")
+        print(f"   Session data: {dict(request.session)}")
+        
+        if not request.user.is_authenticated:
+            print(f"❌ User not authenticated")
+            return Response({'error': 'Authentication required'}, status=401)
+        
+        print(f"✅ User authenticated: {request.user.id}")
         serializer = DetailedUserSerializer(request.user)
         return Response(serializer.data)
 
@@ -184,6 +195,11 @@ class QuestionViewSet(viewsets.ModelViewSet):
         if question_type:
             queryset = queryset.filter(question_type=question_type)
         
+        # Filter by question_number if specified (supports multiple values)
+        question_numbers = self.request.query_params.getlist('question_number')
+        if question_numbers:
+            queryset = queryset.filter(question_number__in=question_numbers)
+        
         # Filter by tags if specified
         tags = self.request.query_params.getlist('tags')
         if tags:
@@ -191,6 +207,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
         
         logger.info(f"QuestionViewSet.get_queryset() called. Request: {self.request.method} {self.request.path}")
         logger.info(f"Query params: {self.request.query_params}")
+        logger.info(f"Question numbers filter: {question_numbers}")
         logger.info(f"Returning {queryset.count()} questions")
         
         return queryset
@@ -209,6 +226,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
             text = request.data.get('text', '').strip()
             question_name = request.data.get('question_name', '').strip()
             question_number = request.data.get('question_number')
+            group_number = request.data.get('group_number')
             group_name = request.data.get('group_name', '').strip()
             tags = request.data.get('tags', [])
             question_type = request.data.get('question_type', 'unanswered')
@@ -218,6 +236,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
             skip_looking_for = request.data.get('skip_looking_for', False)
             open_to_all_me = request.data.get('open_to_all_me', False)
             open_to_all_looking_for = request.data.get('open_to_all_looking_for', False)
+            is_group = request.data.get('is_group', False)
             answers = request.data.get('answers', [])
             
             # Validate required fields
@@ -241,6 +260,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
                 'text': text,
                 'question_name': question_name,
                 'question_number': question_number,
+                'group_number': group_number,
                 'group_name': group_name,
                 'question_type': question_type,
                 'is_required_for_match': is_required_for_match,
@@ -249,6 +269,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
                 'skip_looking_for': skip_looking_for,
                 'open_to_all_me': open_to_all_me,
                 'open_to_all_looking_for': open_to_all_looking_for,
+                'is_group': is_group,
             }
             
             serializer = self.get_serializer(data=question_data)
@@ -267,7 +288,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
             # Create answers
             from .models import QuestionAnswer
             for i, answer_data in enumerate(answers):
-                if answer_data.get('value') and answer_data.get('answer'):
+                if answer_data.get('value'):
                     QuestionAnswer.objects.create(
                         question=question,
                         value=answer_data['value'],
@@ -297,6 +318,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
             text = request.data.get('text', '').strip()
             question_name = request.data.get('question_name', '').strip()
             question_number = request.data.get('question_number')
+            group_number = request.data.get('group_number')
             group_name = request.data.get('group_name', '').strip()
             tags = request.data.get('tags', [])
             question_type = request.data.get('question_type', question.question_type)
@@ -306,6 +328,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
             skip_looking_for = request.data.get('skip_looking_for', question.skip_looking_for)
             open_to_all_me = request.data.get('open_to_all_me', question.open_to_all_me)
             open_to_all_looking_for = request.data.get('open_to_all_looking_for', question.open_to_all_looking_for)
+            is_group = request.data.get('is_group', question.is_group)
             answers = request.data.get('answers', [])
             
             # Validate required fields
@@ -329,6 +352,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
                 'text': text,
                 'question_name': question_name,
                 'question_number': question_number,
+                'group_number': group_number,
                 'group_name': group_name,
                 'question_type': question_type,
                 'is_required_for_match': is_required_for_match,
@@ -337,6 +361,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
                 'skip_looking_for': skip_looking_for,
                 'open_to_all_me': open_to_all_me,
                 'open_to_all_looking_for': open_to_all_looking_for,
+                'is_group': is_group,
             }
             
             serializer = self.get_serializer(question, data=question_data, partial=True)
@@ -360,7 +385,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
                 QuestionAnswer.objects.filter(question=updated_question).delete()
                 # Create new answers
                 for i, answer_data in enumerate(answers):
-                    if answer_data.get('value') and answer_data.get('answer'):
+                    if answer_data.get('value'):
                         QuestionAnswer.objects.create(
                             question=updated_question,
                             value=answer_data['value'],
@@ -434,6 +459,75 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
         print(f"Returning {queryset.count()} answers")
         
         return queryset
+
+    def create(self, request, *args, **kwargs):
+        """
+        Custom create method to handle user_id and question_id
+        """
+        try:
+            # Extract user_id and question_id from request data
+            user_id = request.data.get('user_id')
+            question_id = request.data.get('question_id')
+            
+            if not user_id:
+                return Response({
+                    'error': 'user_id is required'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            if not question_id:
+                return Response({
+                    'error': 'question_id is required'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Get user and question objects
+            try:
+                user = User.objects.get(id=user_id)
+            except User.DoesNotExist:
+                return Response({
+                    'error': 'User not found'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            try:
+                question = Question.objects.get(id=question_id)
+            except Question.DoesNotExist:
+                return Response({
+                    'error': 'Question not found'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Extract other fields
+            me_answer = request.data.get('me_answer', 1)
+            me_open_to_all = request.data.get('me_open_to_all', False)
+            me_importance = request.data.get('me_importance', 1)
+            me_share = request.data.get('me_share', True)
+            looking_for_answer = request.data.get('looking_for_answer', 1)
+            looking_for_open_to_all = request.data.get('looking_for_open_to_all', False)
+            looking_for_importance = request.data.get('looking_for_importance', 1)
+            looking_for_share = request.data.get('looking_for_share', True)
+            
+            # Create or update UserAnswer
+            user_answer, created = UserAnswer.objects.update_or_create(
+                user=user,
+                question=question,
+                defaults={
+                    'me_answer': me_answer,
+                    'me_open_to_all': me_open_to_all,
+                    'me_importance': me_importance,
+                    'me_share': me_share,
+                    'looking_for_answer': looking_for_answer,
+                    'looking_for_open_to_all': looking_for_open_to_all,
+                    'looking_for_importance': looking_for_importance,
+                    'looking_for_share': looking_for_share,
+                }
+            )
+            
+            serializer = self.get_serializer(user_answer)
+            status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+            return Response(serializer.data, status=status_code)
+            
+        except Exception as e:
+            return Response({
+                'error': f'Failed to create user answer: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def perform_create(self, serializer):
         serializer.save()

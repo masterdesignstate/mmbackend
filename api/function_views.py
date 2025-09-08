@@ -3,7 +3,7 @@ import logging
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
-from django.contrib.auth import authenticate
+from django.contrib.auth import authenticate, login
 from django.db import transaction
 from django.contrib.auth.hashers import make_password
 from django.utils import timezone
@@ -98,6 +98,13 @@ def user_signup(request):
             print(f"   Is Active: {user.is_active}")
             print(f"   Date Joined: {user.date_joined}")
             
+            # Log the user in to create a session
+            login(request, user)
+            print(f"🔑 User logged in successfully with session")
+            print(f"   Session key: {request.session.session_key}")
+            print(f"   Session data: {dict(request.session)}")
+            print(f"   User in session: {request.user.id if request.user.is_authenticated else 'Not authenticated'}")
+            
             response_data = {
                 'success': True,
                 'user_id': str(user.id),
@@ -137,7 +144,8 @@ def user_personal_details(request):
     - tagline: Short tagline (max 40 chars)
     - date_of_birth: Date of birth in YYYY-MM-DD format
     - height: Height in feet and inches format (e.g., "5' 11"")
-    - city: User's city
+    - from: User's original location
+    - live: User's current city
     - bio: User's bio (max 160 chars)
     
     Returns:
@@ -158,7 +166,7 @@ def user_personal_details(request):
         print(f"📊 Parsed data: {data}")
         
         # Validate required fields
-        required_fields = ['user_id', 'full_name', 'username', 'date_of_birth', 'city']
+        required_fields = ['user_id', 'full_name', 'username', 'date_of_birth', 'from', 'live']
         missing_fields = [field for field in required_fields if field not in data or not data.get(field)]
         
         if missing_fields:
@@ -262,7 +270,8 @@ def user_personal_details(request):
         user.date_of_birth = date_of_birth
         user.age = age
         user.height = int(height_cm) if height_cm else None
-        user.city = data.get('city')
+        user.from_location = data.get('from')
+        user.live = data.get('live')
         user.bio = data.get('bio', '')[:160]  # Limit to 160 characters
         
         print(f"📝 User data updates:")
@@ -272,7 +281,8 @@ def user_personal_details(request):
         print(f"   Date of birth: {user.date_of_birth}")
         print(f"   Age: {user.age}")
         print(f"   Height: {user.height} cm")
-        print(f"   City: {user.city}")
+        print(f"   From: {user.from_location}")
+        print(f"   Live: {user.live}")
         print(f"   Bio: '{user.bio}'")
         
         # Save the user
@@ -288,7 +298,8 @@ def user_personal_details(request):
                 'username': user.username,
                 'full_name': f"{user.first_name} {user.last_name}".strip(),
                 'age': user.age,
-                'city': user.city,
+                'from': user.from_location,
+                'live': user.live,
                 'bio': user.bio
             }
         }
@@ -434,7 +445,11 @@ def user_login(request):
         print(f"   Email: {user.email}")
         print(f"   Full Name: '{full_name}'")
         print(f"   Age: {user.age}")
-        print(f"   City: {user.city}")
+        print(f"   Live: {user.live}")
+        
+        # Log the user in to create a session
+        login(request, user)
+        print(f"🔑 User logged in successfully with session")
         
         response_data = {
             'success': True,
@@ -446,7 +461,7 @@ def user_login(request):
                 'email': user.email,
                 'full_name': full_name,
                 'age': user.age,
-                'city': user.city
+                'live': user.live
             }
         }
         
@@ -560,7 +575,7 @@ def check_onboarding_status(request):
         # Check onboarding progress - be more flexible with names
         has_personal_details = bool(
             (user.first_name or user.last_name) and  # At least one name field
-            user.city and 
+            user.live and 
             user.bio and
             user.username != user.email  # Username was changed from email
         )
@@ -797,3 +812,57 @@ def upload_photo(request):
         import traceback
         traceback.print_exc()
         return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["DELETE"])
+def delete_question(request, question_id):
+    """
+    Delete a question by ID.
+    
+    URL: /api/questions/{question_id}/
+    Method: DELETE
+    
+    Returns:
+    - success: Boolean indicating success
+    - message: Success message
+    """
+    try:
+        print("🗑️ === DELETE QUESTION ENDPOINT CALLED ===")
+        print(f"📥 Request method: {request.method}")
+        print(f"📥 Question ID: {question_id}")
+        
+        # Import Question model
+        from .models import Question
+        
+        # Get the question
+        try:
+            question = Question.objects.get(id=question_id)
+            print(f"✅ Question found: {question.id}")
+            print(f"📝 Question text: {question.text}")
+        except Question.DoesNotExist:
+            print(f"❌ Question not found with ID: {question_id}")
+            return JsonResponse({
+                'error': 'Question not found'
+            }, status=404)
+        
+        # Delete the question (this will cascade delete answers)
+        question.delete()
+        
+        print(f"✅ Question {question_id} deleted successfully")
+        
+        response_data = {
+            'success': True,
+            'message': 'Question deleted successfully'
+        }
+        
+        print(f"📤 Sending response: {response_data}")
+        return JsonResponse(response_data, status=204)
+        
+    except Exception as e:
+        print(f"❌ Error deleting question: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({
+            'error': f'Failed to delete question: {str(e)}'
+        }, status=500)

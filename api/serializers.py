@@ -18,12 +18,16 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name',
-            'profile_photo', 'age', 'date_of_birth', 'height', 'city', 'bio',
+            'profile_photo', 'age', 'date_of_birth', 'height', 'from_location', 'live', 'bio',
             'is_online', 'last_seen', 'questions_answered_count', 'online_status'
         ]
         read_only_fields = ['id', 'is_online', 'last_seen', 'questions_answered_count']
     
     def get_online_status(self, obj):
+        # Check if user is authenticated and not AnonymousUser
+        if not hasattr(obj, 'online_status') or obj.is_anonymous:
+            return None
+            
         try:
             return {
                 'is_online': obj.online_status.is_online,
@@ -47,9 +51,9 @@ class QuestionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Question
         fields = [
-            'id', 'question_name', 'question_number', 'group_name', 'text', 'tags', 'answers',
+            'id', 'question_name', 'question_number', 'group_number', 'group_name', 'text', 'tags', 'answers',
             'question_type', 'is_required_for_match', 'is_approved', 'skip_me', 'skip_looking_for',
-            'open_to_all_me', 'open_to_all_looking_for', 'created_at', 'updated_at'
+            'open_to_all_me', 'open_to_all_looking_for', 'is_group', 'created_at', 'updated_at'
         ]
 
 
@@ -61,8 +65,8 @@ class UserAnswerSerializer(serializers.ModelSerializer):
         model = UserAnswer
         fields = [
             'id', 'user', 'question', 'me_answer', 'me_open_to_all', 
-            'me_multiplier', 'me_share', 'looking_for_answer', 
-            'looking_for_open_to_all', 'looking_for_multiplier', 
+            'me_importance', 'me_share', 'looking_for_answer', 
+            'looking_for_open_to_all', 'looking_for_importance', 
             'looking_for_share', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'user', 'created_at', 'updated_at']

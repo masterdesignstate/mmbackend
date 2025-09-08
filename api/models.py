@@ -12,7 +12,8 @@ class User(AbstractUser):
     age = models.PositiveIntegerField(null=True, blank=True)
     date_of_birth = models.DateField(null=True, blank=True)
     height = models.PositiveIntegerField(help_text="Height in cm", null=True, blank=True)
-    city = models.CharField(max_length=100, null=True, blank=True)
+    from_location = models.CharField(max_length=100, null=True, blank=True, help_text="Where the user is originally from")
+    live = models.CharField(max_length=100, null=True, blank=True, help_text="Where the user currently lives")
     bio = models.TextField(max_length=500, blank=True)
     is_online = models.BooleanField(default=False)
     last_seen = models.DateTimeField(default=timezone.now)
@@ -55,6 +56,7 @@ class Question(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     question_name = models.CharField(max_length=200, blank=True, help_text="Short name/identifier for the question")
     question_number = models.PositiveIntegerField(null=True, blank=True, help_text="Question number for ordering")
+    group_number = models.PositiveIntegerField(null=True, blank=True, help_text="Group number for organizing questions into categories")
     group_name = models.CharField(max_length=200, blank=True, help_text="Group/category name for the question")
     text = models.TextField()
     tags = models.ManyToManyField(Tag, related_name='questions')
@@ -65,6 +67,7 @@ class Question(models.Model):
     skip_looking_for = models.BooleanField(default=False, help_text="Whether to skip asking about what I'm looking for")
     open_to_all_me = models.BooleanField(default=False, help_text="Whether I'm open to all options")
     open_to_all_looking_for = models.BooleanField(default=False, help_text="Whether I'm open to all options in a partner")
+    is_group = models.BooleanField(default=False, help_text="Whether this question represents a group/category")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -102,7 +105,7 @@ class UserAnswer(models.Model):
         help_text="1-5 for specific answers, 6 for 'open to all'"
     )
     me_open_to_all = models.BooleanField(default=False)
-    me_multiplier = models.PositiveIntegerField(default=1, help_text="Weight multiplier for this answer")
+    me_importance = models.PositiveIntegerField(default=1, help_text="Importance level for this answer")
     me_share = models.BooleanField(default=True, help_text="Whether to share this answer")
     
     # Looking for answers (what I want in a partner)
@@ -111,7 +114,7 @@ class UserAnswer(models.Model):
         help_text="1-5 for specific answers, 6 for 'open to all'"
     )
     looking_for_open_to_all = models.BooleanField(default=False)
-    looking_for_multiplier = models.PositiveIntegerField(default=1, help_text="Weight multiplier for this answer")
+    looking_for_importance = models.PositiveIntegerField(default=1, help_text="Importance level for this answer")
     looking_for_share = models.BooleanField(default=True, help_text="Whether to share this preference")
     
     created_at = models.DateTimeField(auto_now_add=True)

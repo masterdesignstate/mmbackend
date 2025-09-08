@@ -9,10 +9,10 @@ from .models import (
 @admin.register(User)
 class CustomUserAdmin(UserAdmin):
     # Add search functionality
-    search_fields = ['username', 'email', 'first_name', 'last_name', 'city']
+    search_fields = ['username', 'email', 'first_name', 'last_name', 'from_location', 'live']
     
     # Customize list display
-    list_display = ['username', 'email', 'first_name', 'last_name', 'city', 'age', 'is_online', 'is_active', 'date_joined']
+    list_display = ['username', 'email', 'first_name', 'last_name', 'from_location', 'live', 'age', 'is_online', 'is_active', 'date_joined']
     
     # Add filters for easier browsing
     list_filter = ['is_active', 'is_staff', 'is_superuser', 'is_online', 'is_banned', 'date_joined']
@@ -23,7 +23,7 @@ class CustomUserAdmin(UserAdmin):
     # Customize the form fields
     fieldsets = UserAdmin.fieldsets + (
         ('Dating Profile', {
-            'fields': ('profile_photo', 'age', 'date_of_birth', 'height', 'city', 'bio')
+            'fields': ('profile_photo', 'age', 'date_of_birth', 'height', 'from_location', 'live', 'bio')
         }),
         ('Status', {
             'fields': ('is_online', 'last_seen', 'is_banned', 'ban_reason', 'ban_date', 'questions_answered_count')
