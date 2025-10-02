@@ -7,10 +7,18 @@ from django.contrib.auth import authenticate, login
 from django.db import transaction
 from django.contrib.auth.hashers import make_password
 from django.utils import timezone
+from django.conf import settings
 from datetime import datetime
 from .models import User
 
 logger = logging.getLogger(__name__)
+
+
+ADMIN_EMAILS = {
+    email.strip().lower()
+    for email in getattr(settings, 'ADMIN_EMAILS', [])
+    if isinstance(email, str) and email.strip()
+}
 
 
 @csrf_exempt
@@ -272,6 +280,7 @@ def user_personal_details(request):
         user.height = int(height_cm) if height_cm else None
         user.from_location = data.get('from')
         user.live = data.get('live')
+        user.tagline = data.get('tagline', '')[:40]  # Limit to 40 characters
         user.bio = data.get('bio', '')[:160]  # Limit to 160 characters
         
         print(f"📝 User data updates:")
@@ -283,6 +292,7 @@ def user_personal_details(request):
         print(f"   Height: {user.height} cm")
         print(f"   From: {user.from_location}")
         print(f"   Live: {user.live}")
+        print(f"   Tagline: '{user.tagline}'")
         print(f"   Bio: '{user.bio}'")
         
         # Save the user
@@ -428,7 +438,10 @@ def user_login(request):
         
         print(f"✅ Authentication successful!")
         print(f"   Authenticated user: {user.id} - {user.email}")
-        
+        is_admin_user = (user.email or "").strip().lower() in ADMIN_EMAILS
+        if is_admin_user:
+            print(f"🛡️ Admin access granted for: {user.email}")
+
         if not user.is_active:
             print(f"❌ User account is deactivated")
             return JsonResponse({
@@ -446,25 +459,28 @@ def user_login(request):
         print(f"   Full Name: '{full_name}'")
         print(f"   Age: {user.age}")
         print(f"   Live: {user.live}")
-        
+        print(f"   Admin: {'Yes' if is_admin_user else 'No'}")
+
         # Log the user in to create a session
         login(request, user)
         print(f"🔑 User logged in successfully with session")
-        
+
         response_data = {
             'success': True,
             'user_id': str(user.id),
             'message': 'Login successful',
+            'is_admin': is_admin_user,
             'user_data': {
                 'id': str(user.id),
                 'username': user.username,
                 'email': user.email,
                 'full_name': full_name,
                 'age': user.age,
-                'live': user.live
+                'live': user.live,
+                'is_admin': is_admin_user
             }
         }
-        
+
         print(f"📤 Sending successful login response: {response_data}")
         return JsonResponse(response_data, status=200)
         
@@ -571,7 +587,23 @@ def check_onboarding_status(request):
             return JsonResponse({'error': 'User not found'}, status=404)
 
         print(f"✅ User found: {user.username} (ID: {user.id})")
-        
+        is_admin_user = (user.email or '').strip().lower() in ADMIN_EMAILS
+        if is_admin_user:
+            print(f"🛡️ Admin user detected for onboarding bypass: {user.email}")
+            response_data = {
+                'step': 'complete',
+                'step_url': '/dashboard',
+                'progress': 100,
+                'has_personal_details': True,
+                'has_profile_photo': True,
+                'has_gender_preferences': True,
+                'user_id': str(user.id),
+                'is_admin': True,
+                'message': 'Admin users bypass onboarding requirements'
+            }
+            print(f"📤 Sending admin onboarding response: {response_data}")
+            return JsonResponse(response_data)
+
         # Check onboarding progress - be more flexible with names
         has_personal_details = bool(
             (user.first_name or user.last_name) and  # At least one name field
@@ -619,7 +651,8 @@ def check_onboarding_status(request):
             'has_personal_details': has_personal_details,
             'has_profile_photo': has_profile_photo,
             'has_gender_preferences': has_gender_preferences,
-            'user_id': str(user.id)
+            'user_id': str(user.id),
+            'is_admin': is_admin_user
         }
         
         print(f"📤 Sending response: {response_data}")

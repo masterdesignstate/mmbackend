@@ -14,6 +14,7 @@ class User(AbstractUser):
     height = models.PositiveIntegerField(help_text="Height in cm", null=True, blank=True)
     from_location = models.CharField(max_length=100, null=True, blank=True, help_text="Where the user is originally from")
     live = models.CharField(max_length=100, null=True, blank=True, help_text="Where the user currently lives")
+    tagline = models.CharField(max_length=40, blank=True, help_text="Short tagline")
     bio = models.TextField(max_length=500, blank=True)
     is_online = models.BooleanField(default=False)
     last_seen = models.DateTimeField(default=timezone.now)
@@ -45,23 +46,29 @@ class Tag(models.Model):
 
 class Question(models.Model):
     """Questions for the dating app"""
+
     QUESTION_TYPE_CHOICES = [
-        ('mandatory', 'Mandatory'),
-        ('answered', 'Answered'),
-        ('unanswered', 'Unanswered'),
-        ('required', 'Required'),
-        ('submitted', 'Submitted'),
+        ('basic', 'Basic'),
+        ('four', 'Four'),
+        ('grouped', 'Grouped'),
+        ('double', 'Double'),
+        ('triple', 'Triple'),
     ]
-    
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     question_name = models.CharField(max_length=200, blank=True, help_text="Short name/identifier for the question")
     question_number = models.PositiveIntegerField(null=True, blank=True, help_text="Question number for ordering")
     group_number = models.PositiveIntegerField(null=True, blank=True, help_text="Group number for organizing questions into categories")
     group_name = models.CharField(max_length=200, blank=True, help_text="Group/category name for the question")
+    group_name_text = models.TextField(blank=True, help_text="Detailed description or text for the group")
+    question_type = models.CharField(max_length=20, choices=QUESTION_TYPE_CHOICES, default='basic', help_text="Type of question")
     text = models.TextField()
     tags = models.ManyToManyField(Tag, related_name='questions')
-    question_type = models.CharField(max_length=20, choices=QUESTION_TYPE_CHOICES, default='unanswered')
-    is_required_for_match = models.BooleanField(default=False)
+    is_required_for_match = models.BooleanField(default=False, help_text="Whether this question is required for matching")
+    is_mandatory = models.BooleanField(default=False, help_text="Whether this is a mandatory question (1-10)")
+    submitted_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, 
+                                    related_name='submitted_questions', 
+                                    help_text="User who submitted this question")
     is_approved = models.BooleanField(default=False, help_text="Whether the question is approved for use")
     skip_me = models.BooleanField(default=False, help_text="Whether to skip asking about me")
     skip_looking_for = models.BooleanField(default=False, help_text="Whether to skip asking about what I'm looking for")
@@ -143,6 +150,18 @@ class Compatibility(models.Model):
     class Meta:
         unique_together = ['user1', 'user2']
         verbose_name_plural = 'compatibilities'
+        indexes = [
+            # Fast lookups for user1 compatibility queries
+            models.Index(fields=['user1', '-overall_compatibility'], name='compatibility_user1_score'),
+            # Fast lookups for user2 compatibility queries
+            models.Index(fields=['user2', '-overall_compatibility'], name='compatibility_user2_score'),
+            # Combined index for filtering by compatibility score ranges
+            models.Index(fields=['-overall_compatibility'], name='compatibility_score_idx'),
+            # Fast lookups for specific user pairs
+            models.Index(fields=['user1', 'user2'], name='compatibility_pair_idx'),
+            # Fast lookups for last_calculated (for cache invalidation)
+            models.Index(fields=['last_calculated'], name='compatibility_calculated_idx'),
+        ]
     
     def __str__(self):
         return f"{self.user1.username} & {self.user2.username}"
@@ -278,3 +297,42 @@ class UserTag(models.Model):
     
     def __str__(self):
         return f"{self.user.username} tagged {self.tagged_user.username} as {self.tag}"
+
+
+class Controls(models.Model):
+    """App-wide control values for configuration"""
+    adjust = models.FloatField(
+        default=5.0,
+        help_text="Adjustment factor for calculations"
+    )
+    exponent = models.FloatField(
+        default=2.0,
+        help_text="Exponent value for calculations"
+    )
+    ota = models.FloatField(
+        default=0.5,
+        help_text="OTA (Open To All) weight factor",
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)]
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Control Settings'
+        verbose_name_plural = 'Control Settings'
+
+    def __str__(self):
+        return f"Controls (adjust={self.adjust}, exponent={self.exponent}, ota={self.ota})"
+
+    @classmethod
+    def get_current(cls):
+        """Get the current control settings, creating default if none exists"""
+        controls, created = cls.objects.get_or_create(
+            id=1,  # Always use ID 1 for the single controls instance
+            defaults={
+                'adjust': 5.0,
+                'exponent': 2.0,
+                'ota': 0.5
+            }
+        )
+        return controls

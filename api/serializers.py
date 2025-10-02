@@ -18,7 +18,7 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name',
-            'profile_photo', 'age', 'date_of_birth', 'height', 'from_location', 'live', 'bio',
+            'profile_photo', 'age', 'date_of_birth', 'height', 'from_location', 'live', 'tagline', 'bio',
             'is_online', 'last_seen', 'questions_answered_count', 'online_status'
         ]
         read_only_fields = ['id', 'is_online', 'last_seen', 'questions_answered_count']
@@ -47,14 +47,32 @@ class QuestionAnswerSerializer(serializers.ModelSerializer):
 class QuestionSerializer(serializers.ModelSerializer):
     tags = TagSerializer(many=True, read_only=True)
     answers = QuestionAnswerSerializer(many=True, read_only=True)
+    submitted_by = UserSerializer(read_only=True)
+    is_answered = serializers.SerializerMethodField()
+    is_submitted_by_me = serializers.SerializerMethodField()
     
     class Meta:
         model = Question
         fields = [
-            'id', 'question_name', 'question_number', 'group_number', 'group_name', 'text', 'tags', 'answers',
-            'question_type', 'is_required_for_match', 'is_approved', 'skip_me', 'skip_looking_for',
-            'open_to_all_me', 'open_to_all_looking_for', 'is_group', 'created_at', 'updated_at'
+            'id', 'question_name', 'question_number', 'group_number', 'group_name', 'group_name_text', 'question_type',
+            'text', 'tags', 'answers', 'is_required_for_match', 'is_mandatory', 'submitted_by', 'is_approved',
+            'skip_me', 'skip_looking_for', 'open_to_all_me', 'open_to_all_looking_for', 'is_group',
+            'created_at', 'updated_at', 'is_answered', 'is_submitted_by_me'
         ]
+    
+    def get_is_answered(self, obj):
+        """Check if the current user has answered this question"""
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.user_answers.filter(user=request.user).exists()
+        return False
+    
+    def get_is_submitted_by_me(self, obj):
+        """Check if this question was submitted by the current user"""
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            return obj.submitted_by == request.user
+        return False
 
 
 class UserAnswerSerializer(serializers.ModelSerializer):
@@ -165,6 +183,25 @@ class DetailedUserSerializer(UserSerializer):
 
 class DetailedQuestionSerializer(QuestionSerializer):
     user_answers = UserAnswerSerializer(many=True, read_only=True)
-    
+
     class Meta(QuestionSerializer.Meta):
-        fields = QuestionSerializer.Meta.fields + ['user_answers'] 
+        fields = QuestionSerializer.Meta.fields + ['user_answers']
+
+
+# Lightweight serializers for compatibility endpoint (no circular references)
+class SimpleUserSerializer(serializers.ModelSerializer):
+    """Lightweight user serializer for compatibility lists - no nested data"""
+    class Meta:
+        model = User
+        fields = [
+            'id', 'username', 'email', 'first_name', 'last_name',
+            'profile_photo', 'age', 'date_of_birth', 'height',
+            'from_location', 'live', 'tagline', 'bio', 'is_online', 'last_seen'
+        ]
+
+class CompactCompatibilityResultSerializer(serializers.Serializer):
+    """Lightweight compatibility data serializer"""
+    overall_compatibility = serializers.FloatField()
+    compatible_with_me = serializers.FloatField()
+    im_compatible_with = serializers.FloatField()
+    mutual_questions_count = serializers.IntegerField() 

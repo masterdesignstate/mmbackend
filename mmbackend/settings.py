@@ -193,12 +193,19 @@ CORS_ALLOW_HEADERS = [
 # Azure Storage Configuration
 USE_AZURE_STORAGE = config('AZURE_ACCOUNT_NAME', default=None) is not None
 
+# Admin dashboard access
+ADMIN_EMAILS = [
+    email.strip().lower()
+    for email in config('ADMIN_EMAILS', default='atomsable@gmail.com').split(',')
+    if email.strip()
+]
+
 if USE_AZURE_STORAGE:
     # Azure Storage settings
     AZURE_ACCOUNT_NAME = config('AZURE_ACCOUNT_NAME')
     AZURE_ACCOUNT_KEY = config('AZURE_ACCOUNT_KEY')
     AZURE_CONTAINER = config('AZURE_CONTAINER', default='media')
-    
+
     # Use Azure for media files
     DEFAULT_FILE_STORAGE = 'storages.backends.azure_storage.AzureStorage'
     AZURE_CUSTOM_DOMAIN = f'{AZURE_ACCOUNT_NAME}.blob.core.windows.net'
@@ -211,3 +218,15 @@ else:
 # Static files configuration
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+# Cache configuration for performance
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'unique-snowflake',
+        'TIMEOUT': 3600,  # 1 hour default timeout
+        'OPTIONS': {
+            'MAX_ENTRIES': 1000,
+        }
+    }
+}
