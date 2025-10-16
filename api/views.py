@@ -366,7 +366,79 @@ class UserViewSet(viewsets.ModelViewSet):
             if max_compatibility < 100:
                 compatibilities = compatibilities.filter(overall_compatibility__lte=max_compatibility)
 
-            # Tag filtering logic removed - restore original simple behavior
+            # Apply tag filters
+            if tags:
+                from .models import UserResult
+                print(f"🔍 Applying tag filters: {tags}")
+                
+                # Get user IDs that match the tag criteria
+                tag_filtered_user_ids = set()
+                
+                for tag in tags:
+                    tag_lower = tag.lower()
+                    print(f"🔍 Processing tag: {tag_lower}")
+                    
+                    if tag_lower == 'liked':
+                        # Users I have liked
+                        liked_user_ids = UserResult.objects.filter(
+                            user=request.user,
+                            tag='like'
+                        ).values_list('result_user_id', flat=True)
+                        tag_filtered_user_ids.update(liked_user_ids)
+                        print(f"🔍 Found {len(liked_user_ids)} liked users")
+                        
+                    elif tag_lower == 'approved':
+                        # Users I have approved
+                        approved_user_ids = UserResult.objects.filter(
+                            user=request.user,
+                            tag='approve'
+                        ).values_list('result_user_id', flat=True)
+                        tag_filtered_user_ids.update(approved_user_ids)
+                        print(f"🔍 Found {len(approved_user_ids)} approved users")
+                        
+                    elif tag_lower == 'matched':
+                        # Users I have liked AND who have liked me (mutual likes)
+                        my_liked_users = set(UserResult.objects.filter(
+                            user=request.user,
+                            tag='like'
+                        ).values_list('result_user_id', flat=True))
+                        
+                        users_who_liked_me = set(UserResult.objects.filter(
+                            result_user=request.user,
+                            tag='like'
+                        ).values_list('user_id', flat=True))
+                        
+                        matched_user_ids = my_liked_users.intersection(users_who_liked_me)
+                        tag_filtered_user_ids.update(matched_user_ids)
+                        print(f"🔍 Found {len(matched_user_ids)} matched users")
+                        
+                    else:
+                        # Handle other tags
+                        other_tag_user_ids = UserResult.objects.filter(
+                            user=request.user,
+                            tag=tag_lower
+                        ).values_list('result_user_id', flat=True)
+                        tag_filtered_user_ids.update(other_tag_user_ids)
+                        print(f"🔍 Found {len(other_tag_user_ids)} users with tag '{tag_lower}'")
+                
+                # Filter compatibilities to only include users that match tag criteria
+                if tag_filtered_user_ids:
+                    print(f"🔍 Tag filtered user IDs: {list(tag_filtered_user_ids)}")
+                    compatibilities = compatibilities.filter(
+                        Q(user1__id__in=tag_filtered_user_ids) | Q(user2__id__in=tag_filtered_user_ids)
+                    )
+                    print(f"🔍 After tag filtering: {compatibilities.count()} compatibilities remain")
+                else:
+                    print(f"🔍 No users match tag criteria, returning empty result")
+                    return Response({
+                        'results': [],
+                        'count': 0,
+                        'total_count': 0,
+                        'page': page,
+                        'page_size': page_size,
+                        'has_next': False,
+                        'message': 'No users match the selected tag filters'
+                    })
 
             # Check if we have sufficient pre-calculated data
             total_compatibilities = compatibilities.count()
