@@ -5,6 +5,8 @@ from django.db.models import Q, Count
 from django.utils import timezone
 from datetime import timedelta
 import logging
+import time
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +19,8 @@ from .serializers import (
     UserSerializer, TagSerializer, QuestionSerializer, UserAnswerSerializer,
     CompatibilitySerializer, UserResultSerializer, MessageSerializer,
     PictureModerationSerializer, UserReportSerializer, UserOnlineStatusSerializer,
-    DetailedUserSerializer, DetailedQuestionSerializer, UserTagSerializer
+    DetailedUserSerializer, DetailedQuestionSerializer, UserTagSerializer,
+    SimpleUserSerializer,
 )
 
 
@@ -176,37 +179,173 @@ class UserViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def compatible(self, request):
         """Get users compatible with the current user"""
-        # For demo purposes, allow unauthenticated access with test user
-        if not request.user.is_authenticated:
+        # Allow user_id parameter for frontend compatibility
+        user_id_param = request.query_params.get('user_id')
+        if user_id_param:
             from django.contrib.auth import get_user_model
             User = get_user_model()
-            test_users = User.objects.filter(answers__isnull=False).distinct()
-            if not test_users.exists():
-                return Response({'error': 'No users with answers found for testing'}, status=404)
-            request.user = test_users.first()
-            print(f"Using test user for demo: {request.user.username} (ID: {request.user.id})")
+            try:
+                request.user = User.objects.get(id=user_id_param)
+                print(f"Using provided user ID: {request.user.username} (ID: {request.user.id})")
+            except User.DoesNotExist:
+                return Response({'error': 'User not found'}, status=404)
+        elif not request.user.is_authenticated:
+            return Response({'error': 'Authentication required'}, status=401)
 
         # Get filter parameters
         compatibility_type = request.query_params.get('compatibility_type', 'overall_compatibility')
         min_compatibility = float(request.query_params.get('min_compatibility', 0))
         max_compatibility = float(request.query_params.get('max_compatibility', 100))
+        required_only = request.query_params.get('required_only', 'false').lower() == 'true'
+        
+        # Get tag filter parameters
+        tags = request.query_params.getlist('tags')  # Get multiple tag values
+        print(f"🔍 Tag filters: {tags}")
 
         # Get pagination parameters
         page = int(request.query_params.get('page', 1))
         page_size = int(request.query_params.get('page_size', 15))
         offset = (page - 1) * page_size
 
+        print(f"🔍 === COMPATIBLE ENDPOINT CALLED ===")
+        print(f"   User: {request.user.id}")
+        print(f"   required_only={required_only}")
         logger.info(f"Compatible users request for user {request.user.id}")
-        logger.info(f"Filters: type={compatibility_type}, min={min_compatibility}, max={max_compatibility}")
+        logger.info(f"Filters: type={compatibility_type}, min={min_compatibility}, max={max_compatibility}, required_only={required_only}")
         logger.info(f"Pagination: page={page}, size={page_size}, offset={offset}")
 
         try:
-            # Use pre-calculated compatibilities for instant ranking of ALL users
             from django.db.models import Q, Case, When, FloatField
             from .models import Compatibility
             from .serializers import SimpleUserSerializer
 
-            # Get pre-calculated compatibilities for current user, ordered by compatibility score
+            compatibility_field = {
+                'overall_compatibility': 'overall_compatibility',
+                'compatible_with_me': 'compatible_with_me',
+                'im_compatible_with': 'im_compatible_with',
+            }.get(compatibility_type, 'overall_compatibility')
+
+            if required_only:
+                logger.info("Using real-time calculation for required-only filter")
+                from .services.compatibility_service import CompatibilityService
+
+                start_time = time.monotonic()
+                max_candidates = 60
+
+                compat_candidates = Compatibility.objects.filter(
+                    Q(user1=request.user) | Q(user2=request.user)
+                ).select_related('user1', 'user2').order_by('-overall_compatibility')[:max_candidates * 3]
+
+                candidate_users: list[User] = []
+                seen_candidate_ids = set()
+
+                for comp in compat_candidates:
+                    other_user = comp.user2 if comp.user1 == request.user else comp.user1
+                    if other_user.is_banned or other_user.id == request.user.id:
+                        continue
+                    if other_user.id in seen_candidate_ids:
+                        continue
+                    candidate_users.append(other_user)
+                    seen_candidate_ids.add(other_user.id)
+                    if len(candidate_users) >= max_candidates:
+                        break
+
+                if not candidate_users:
+                    candidate_users = list(
+                        User.objects.exclude(id=request.user.id)
+                        .exclude(is_banned=True)
+                        .filter(answers__isnull=False)
+                        .distinct()[:max_candidates]
+                    )
+
+                candidate_ids = [user.id for user in candidate_users]
+
+                answer_qs = UserAnswer.objects.filter(
+                    Q(user=request.user) | Q(user__in=candidate_ids)
+                ).filter(question__is_required_for_match=True).only(
+                    'user_id',
+                    'question_id',
+                    'me_answer',
+                    'me_open_to_all',
+                    'me_importance',
+                    'looking_for_answer',
+                    'looking_for_open_to_all',
+                    'looking_for_importance',
+                )
+
+                answers_by_user: dict[object, list[UserAnswer]] = defaultdict(list)
+                for answer in answer_qs:
+                    answers_by_user[answer.user_id].append(answer)
+
+                current_user_answers = answers_by_user.get(request.user.id, [])
+
+                if not current_user_answers:
+                    logger.info("Required-only: current user has no required-question answers; returning empty result set")
+                    return Response({
+                        'results': [],
+                        'count': 0,
+                        'total_count': 0,
+                        'page': page,
+                        'page_size': page_size,
+                        'has_next': False,
+                        'message': 'No required-question matches available'
+                    })
+
+                compatibility_results = []
+                for other_user in candidate_users:
+                    other_answers = answers_by_user.get(other_user.id, [])
+                    if not other_answers or not current_user_answers:
+                        continue
+                    compatibility_data = CompatibilityService.calculate_compatibility_between_users(
+                        request.user,
+                        other_user,
+                        required_only=True,
+                        user1_answers=current_user_answers,
+                        user2_answers=other_answers,
+                    )
+                    score = compatibility_data.get(compatibility_field, 0.0)
+                    if score < min_compatibility or score > max_compatibility:
+                        continue
+                    compatibility_results.append({
+                        'user': other_user,
+                        'compatibility': compatibility_data
+                    })
+
+                compatibility_results.sort(
+                    key=lambda x: x['compatibility'].get(compatibility_field, 0.0),
+                    reverse=True
+                )
+
+                total_users = len(compatibility_results)
+                paginated_results = compatibility_results[offset:offset + page_size]
+
+                response_data = []
+                for result in paginated_results:
+                    user_serializer = SimpleUserSerializer(result['user'])
+                    response_data.append({
+                        'user': user_serializer.data,
+                        'compatibility': result['compatibility']
+                    })
+
+                duration = time.monotonic() - start_time
+                logger.info(
+                    "Required-only calculation returned %s users (checked %s candidates) in %.2fs",
+                    len(response_data),
+                    len(candidate_users),
+                    duration,
+                )
+
+                return Response({
+                    'results': response_data,
+                    'count': len(response_data),
+                    'total_count': total_users,
+                    'page': page,
+                    'page_size': page_size,
+                    'has_next': offset + page_size < total_users,
+                    'message': f"Showing {len(response_data)} users from {total_users} total ranked by compatibility (real-time)"
+                })
+
+            # Use pre-calculated compatibilities for instant ranking of ALL users
             compatibilities = Compatibility.objects.filter(
                 Q(user1=request.user) | Q(user2=request.user)
             ).select_related('user1', 'user2').annotate(
@@ -227,56 +366,10 @@ class UserViewSet(viewsets.ModelViewSet):
             if max_compatibility < 100:
                 compatibilities = compatibilities.filter(overall_compatibility__lte=max_compatibility)
 
+            # Tag filtering logic removed - restore original simple behavior
+
             # Check if we have sufficient pre-calculated data
             total_compatibilities = compatibilities.count()
-
-            # If we have very few pre-calculated results, fall back to real-time calculation
-            if False:  # Temporarily disabled - real-time calculation too slow
-                logger.info("Insufficient pre-calculated data, falling back to real-time calculation")
-                from .services.compatibility_service import CompatibilityService
-
-                # Get all users for real-time calculation
-                all_users = User.objects.exclude(id=request.user.id).exclude(is_banned=True).filter(
-                    answers__isnull=False
-                ).distinct()
-
-                # Calculate compatibility for all users
-                compatibility_results = []
-                for other_user in all_users:
-                    compatibility_data = CompatibilityService.calculate_compatibility_between_users(
-                        request.user, other_user
-                    )
-                    compatibility_results.append({
-                        'user': other_user,
-                        'compatibility': compatibility_data
-                    })
-
-                # Sort by overall compatibility
-                compatibility_results.sort(key=lambda x: x['compatibility']['overall_compatibility'], reverse=True)
-
-                # Apply pagination
-                total_users = len(compatibility_results)
-                paginated_results = compatibility_results[offset:offset + page_size]
-
-                # Build response
-                response_data = []
-                for result in paginated_results:
-                    user_serializer = SimpleUserSerializer(result['user'])
-                    response_data.append({
-                        'user': user_serializer.data,
-                        'compatibility': result['compatibility']
-                    })
-
-                logger.info(f"Returning {len(response_data)} compatible users from real-time calculation")
-                return Response({
-                    'results': response_data,
-                    'count': len(response_data),
-                    'total_count': total_users,
-                    'page': page,
-                    'page_size': page_size,
-                    'has_next': offset + page_size < total_users,
-                    'message': f'Showing {len(response_data)} users from {total_users} total ranked by compatibility (real-time)'
-                })
 
             # Use pre-calculated results
             paginated_compatibilities = compatibilities[offset:offset + page_size]
@@ -336,38 +429,39 @@ class QuestionViewSet(viewsets.ModelViewSet):
     ordering = ['question_number', 'group_number']
 
     def get_queryset(self):
-        queryset = Question.objects.all()
-        
+        # Use prefetch_related to optimize queries for tags and related objects
+        queryset = Question.objects.all().prefetch_related('tags').select_related('submitted_by')
+
         # Filter by is_mandatory if specified
         is_mandatory = self.request.query_params.get('is_mandatory')
         if is_mandatory is not None:
             queryset = queryset.filter(is_mandatory=is_mandatory.lower() == 'true')
-        
+
         # Filter by is_required_for_match if specified
         is_required = self.request.query_params.get('is_required_for_match')
         if is_required is not None:
             queryset = queryset.filter(is_required_for_match=is_required.lower() == 'true')
-        
+
         # Filter by submitted_by if specified
         submitted_by = self.request.query_params.get('submitted_by')
         if submitted_by:
             queryset = queryset.filter(submitted_by__id=submitted_by)
-        
+
         # Filter by question_number if specified (supports multiple values and gt/lt)
         question_numbers = self.request.query_params.getlist('question_number')
         if question_numbers:
             queryset = queryset.filter(question_number__in=question_numbers)
-        
+
         # Support question_number__gt for pagination
         question_number_gt = self.request.query_params.get('question_number__gt')
         if question_number_gt:
             queryset = queryset.filter(question_number__gt=int(question_number_gt))
-        
+
         # Filter by tags if specified
         tags = self.request.query_params.getlist('tags')
         if tags:
             queryset = queryset.filter(tags__name__in=tags).distinct()
-        
+
         # Filter by whether user has answered (requires authenticated user)
         has_answer = self.request.query_params.get('has_answer')
         if has_answer is not None and self.request.user.is_authenticated:
@@ -375,11 +469,11 @@ class QuestionViewSet(viewsets.ModelViewSet):
                 queryset = queryset.filter(user_answers__user=self.request.user).distinct()
             else:
                 queryset = queryset.exclude(user_answers__user=self.request.user)
-        
+
         logger.info(f"QuestionViewSet.get_queryset() called. Request: {self.request.method} {self.request.path}")
         logger.info(f"Query params: {self.request.query_params}")
         logger.info(f"Returning {queryset.count()} questions")
-        
+
         return queryset
 
     def get_serializer_class(self):
@@ -648,6 +742,71 @@ class QuestionViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
     @action(detail=False, methods=['get'])
+    def metadata(self, request):
+        """
+        Get question metadata in a single optimized query.
+        Returns: distinct question numbers, total count, and answer counts.
+        This replaces multiple paginated requests on the frontend.
+        """
+        from django.core.cache import cache
+        from django.db.models import Count
+
+        # Try to get from cache first (5 minute TTL)
+        cache_key = 'questions_metadata_v2'  # Changed version to force cache refresh
+        cached_data = cache.get(cache_key)
+
+        if cached_data:
+            logger.info("Returning cached question metadata")
+            return Response(cached_data)
+
+        # Get distinct question numbers using database aggregation (fast with index)
+        distinct_numbers = Question.objects.values('question_number').distinct().order_by('question_number')
+        question_numbers = [item['question_number'] for item in distinct_numbers]
+
+        # Calculate answer counts efficiently using aggregation
+        answer_counts = {}
+
+        # Group questions by question_number
+        questions_by_number = {}
+        questions = Question.objects.all().prefetch_related('user_answers')
+
+        for question in questions:
+            if question.question_number not in questions_by_number:
+                questions_by_number[question.question_number] = []
+            questions_by_number[question.question_number].append(question)
+
+        # Calculate counts per question group
+        for question_number, question_group in questions_by_number.items():
+            if not question_group:
+                continue
+
+            # Check if grouped question
+            is_grouped = len(question_group) > 1 or question_group[0].question_type in ['grouped', 'four', 'triple', 'double']
+
+            if is_grouped:
+                # For grouped: count unique users who answered ANY question in group
+                user_ids = set()
+                for question in question_group:
+                    user_ids.update(UserAnswer.objects.filter(question=question).values_list('user_id', flat=True))
+                answer_counts[question_number] = len(user_ids)
+            else:
+                # For individual: count users who answered this specific question
+                answer_counts[question_number] = UserAnswer.objects.filter(question=question_group[0]).values('user').distinct().count()
+
+        # Prepare response data
+        metadata = {
+            'distinct_question_numbers': question_numbers,
+            'total_question_groups': len(question_numbers),
+            'answer_counts': answer_counts
+        }
+
+        # Cache for 5 minutes
+        cache.set(cache_key, metadata, 300)
+
+        logger.info(f"Generated question metadata: {len(question_numbers)} question groups")
+        return Response(metadata)
+
+    @action(detail=False, methods=['get'])
     def answer_counts(self, request):
         """Get answer counts for questions"""
         # Get all questions grouped by question_number
@@ -847,6 +1006,87 @@ class UserResultViewSet(viewsets.ModelViewSet):
         results = self.get_queryset().filter(tag='matched')
         serializer = self.get_serializer(results, many=True)
         return Response(serializer.data)
+
+    @action(detail=False, methods=['post'])
+    def toggle_tag(self, request):
+        """Toggle a tag for a user - add if doesn't exist, remove if exists"""
+        user_id = request.data.get('user_id')
+        result_user_id = request.data.get('result_user_id')
+        tag = request.data.get('tag')
+        
+
+        if not all([user_id, result_user_id, tag]):
+            return Response(
+                {'error': 'user_id, result_user_id, and tag are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Normalize tag to lowercase
+        tag = tag.lower()
+
+        try:
+            user = User.objects.get(id=user_id)
+            result_user = User.objects.get(id=result_user_id)
+        except User.DoesNotExist as e:
+            return Response(
+                {'error': 'User not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Check if tag exists
+        user_result = UserResult.objects.filter(
+            user=user,
+            result_user=result_user,
+            tag=tag
+        ).first()
+        
+
+        if user_result:
+            # Tag exists, remove it
+            user_result.delete()
+            return Response({
+                'action': 'removed',
+                'tag': tag,
+                'user_id': str(user_id),
+                'result_user_id': str(result_user_id)
+            })
+        else:
+            # Tag doesn't exist, add it
+            user_result = UserResult.objects.create(
+                user=user,
+                result_user=result_user,
+                tag=tag
+            )
+            serializer = self.get_serializer(user_result)
+            return Response({
+                'action': 'added',
+                'tag': tag,
+                'user_id': str(user_id),
+                'result_user_id': str(result_user_id),
+                'data': serializer.data
+            }, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['get'])
+    def user_tags(self, request):
+        """Get all tags for a specific user pair"""
+        user_id = request.query_params.get('user_id')
+        result_user_id = request.query_params.get('result_user_id')
+        
+
+        if not user_id or not result_user_id:
+            return Response(
+                {'error': 'user_id and result_user_id are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        tags = UserResult.objects.filter(
+            user_id=user_id,
+            result_user_id=result_user_id
+        ).values_list('tag', flat=True)
+        
+        tags_list = list(tags)
+
+        return Response({'tags': tags_list})
 
 
 class UserTagViewSet(viewsets.ModelViewSet):

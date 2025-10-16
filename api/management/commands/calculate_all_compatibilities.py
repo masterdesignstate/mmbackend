@@ -51,8 +51,9 @@ class Command(BaseCommand):
             self.stdout.write(f'📦 Processing batch {i // batch_size + 1}: users {i + 1}-{min(i + batch_size, total_users)}')
 
             for j, user1 in enumerate(batch_users):
-                # Calculate with all remaining users (to avoid duplicates)
-                remaining_users = users[i + j + 1:]
+                # Calculate with all users that come after this user in the entire list
+                user1_position = i + j
+                remaining_users = users[user1_position + 1:]
 
                 for user2 in remaining_users:
                     if user1.id == user2.id:

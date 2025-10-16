@@ -168,30 +168,38 @@ class Compatibility(models.Model):
 
 
 class UserResult(models.Model):
-    """Results/tags for other users"""
+    """Results/tags for other users - supports multiple tags per user pair"""
     RESULT_TAG_CHOICES = [
         ('approve', 'Approve'),
         ('approved_me', 'Approved Me'),
         ('hot', 'Hot'),
         ('maybe', 'Maybe'),
+        ('like', 'Like'),
         ('liked', 'Liked'),
         ('liked_me', 'Liked Me'),
         ('matched', 'Matched'),
+        ('save', 'Save'),
         ('saved', 'Saved'),
         ('not_approved', 'Not Approved'),
+        ('hide', 'Hide'),
         ('hidden', 'Hidden'),
     ]
-    
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='my_results')
     result_user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='results_from_others')
     tag = models.CharField(max_length=20, choices=RESULT_TAG_CHOICES)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     class Meta:
-        unique_together = ['user', 'result_user']
-    
+        # Changed: Allow multiple tags per user pair
+        unique_together = ['user', 'result_user', 'tag']
+        indexes = [
+            models.Index(fields=['user', 'result_user'], name='userresult_user_pair_idx'),
+            models.Index(fields=['user', 'tag'], name='userresult_user_tag_idx'),
+        ]
+
     def __str__(self):
         return f"{self.user.username} tagged {self.result_user.username} as {self.tag}"
 

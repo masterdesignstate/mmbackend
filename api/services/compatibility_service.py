@@ -1,4 +1,5 @@
 import math
+from functools import lru_cache
 from typing import Dict, List, Tuple, Optional
 from django.db.models import Q
 from django.core.cache import cache
@@ -9,6 +10,7 @@ class CompatibilityService:
     """Service for calculating compatibility between users using the mathematical algorithm"""
 
     @staticmethod
+    @lru_cache(maxsize=1)
     def get_constants() -> Dict[str, float]:
         """Get current control constants from database"""
         controls = Controls.get_current()
@@ -19,10 +21,15 @@ class CompatibilityService:
         }
 
     @staticmethod
-    def map_importance_to_factor(importance: int) -> float:
+    def clear_constants_cache() -> None:
+        """Clear cached constants (useful if controls are updated)"""
+        CompatibilityService.get_constants.cache_clear()
+
+    @staticmethod
+    def map_importance_to_factor(importance: int, exponent: Optional[float] = None) -> float:
         """Map importance level (1-5) to importance factor per specification"""
-        constants = CompatibilityService.get_constants()
-        exponent = constants['EXPONENT']
+        if exponent is None:
+            exponent = CompatibilityService.get_constants()['EXPONENT']
 
         if importance == 1:
             return 0.0
@@ -45,18 +52,21 @@ class CompatibilityService:
         their_them: int,        # What they want from a partner (their_answer in Direction B)
         their_importance: int,  # Their importance for this preference
         my_open_to_all: bool = False,
-        their_open_to_all: bool = False
+        their_open_to_all: bool = False,
+        constants: Optional[Dict[str, float]] = None,
     ) -> Tuple[float, float, float, float]:
         """
         Calculate question score per your mathematical specification
         Returns (M_A, MAX_A, M_B, MAX_B) for proper weighted averaging
         """
-        constants = CompatibilityService.get_constants()
+        if constants is None:
+            constants = CompatibilityService.get_constants()
         adjust_value = constants['ADJUST_VALUE']
         ota = constants['OTA']
 
-        my_importance_factor = CompatibilityService.map_importance_to_factor(my_importance)
-        their_importance_factor = CompatibilityService.map_importance_to_factor(their_importance)
+        exponent = constants['EXPONENT']
+        my_importance_factor = CompatibilityService.map_importance_to_factor(my_importance, exponent)
+        their_importance_factor = CompatibilityService.map_importance_to_factor(their_importance, exponent)
 
         # Direction A: "Compatible with Me" - How well they fit what I want
         # Compare: My_Them[i] vs Their_Me[i]
@@ -87,19 +97,62 @@ class CompatibilityService:
         return M_A, MAX_A, M_B, MAX_B
 
     @staticmethod
-    def calculate_compatibility_between_users(user1: User, user2: User) -> Dict[str, float]:
+    def calculate_compatibility_between_users(
+        user1: User,
+        user2: User,
+        required_only: bool = False,
+        user1_answers: Optional[List[UserAnswer]] = None,
+        user2_answers: Optional[List[UserAnswer]] = None,
+    ) -> Dict[str, float]:
         """
         Calculate full compatibility between two users with caching
         Returns dictionary with compatibility scores and metadata
+
+        Args:
+            user1: First user
+            user2: Second user
+            required_only: If True, only use questions marked as required for matching
         """
-        # Check cache first
-        cache_key = f"compatibility_{min(user1.id, user2.id)}_{max(user1.id, user2.id)}"
+        # Check cache first (different cache key for required_only)
+        cache_suffix = "_required" if required_only else ""
+        cache_key = f"compatibility_{min(user1.id, user2.id)}_{max(user1.id, user2.id)}{cache_suffix}"
         cached_result = cache.get(cache_key)
         if cached_result:
             return cached_result
-        # Get all answers for both users with optimized queries
-        user1_answers = UserAnswer.objects.filter(user=user1).select_related('question').prefetch_related('question__tags')
-        user2_answers = UserAnswer.objects.filter(user=user2).select_related('question').prefetch_related('question__tags')
+
+        if user1_answers is None:
+            user1_answers_query = UserAnswer.objects.filter(user=user1)
+            if required_only:
+                user1_answers_query = user1_answers_query.filter(question__is_required_for_match=True)
+            user1_answers = list(user1_answers_query.only(
+                'question_id',
+                'me_answer',
+                'me_open_to_all',
+                'me_importance',
+                'looking_for_answer',
+                'looking_for_open_to_all',
+                'looking_for_importance',
+            ))
+        else:
+            user1_answers = list(user1_answers)
+
+        if user2_answers is None:
+            user2_answers_query = UserAnswer.objects.filter(user=user2)
+            if required_only:
+                user2_answers_query = user2_answers_query.filter(question__is_required_for_match=True)
+            user2_answers = list(user2_answers_query.only(
+                'question_id',
+                'me_answer',
+                'me_open_to_all',
+                'me_importance',
+                'looking_for_answer',
+                'looking_for_open_to_all',
+                'looking_for_importance',
+            ))
+        else:
+            user2_answers = list(user2_answers)
+
+        constants = CompatibilityService.get_constants()
 
         # Create dictionaries for quick lookup
         user1_answer_dict = {answer.question_id: answer for answer in user1_answers}
@@ -135,7 +188,8 @@ class CompatibilityService:
                 their_them=user2_answer.looking_for_answer,     # What user2 wants from a partner
                 their_importance=user2_answer.looking_for_importance,
                 my_open_to_all=user1_answer.looking_for_open_to_all,
-                their_open_to_all=user2_answer.me_open_to_all
+                their_open_to_all=user2_answer.me_open_to_all,
+                constants=constants,
             )
 
             # Accumulate totals for weighted averaging

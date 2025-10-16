@@ -613,15 +613,22 @@ def check_onboarding_status(request):
         )
         
         has_profile_photo = bool(user.profile_photo)
-        
-        # Check if gender preferences are set (we'll check for any gender-related fields)
-        # For now, we'll assume gender preferences are missing and need to be collected
-        has_gender_preferences = False  # TODO: Check actual gender preference fields when model is created
+
+        # Check if user has answered mandatory questions (questions 1-10)
+        from .models import UserAnswer, Question
+        mandatory_questions = Question.objects.filter(is_mandatory=True)
+        mandatory_question_ids = set(mandatory_questions.values_list('id', flat=True))
+        answered_question_ids = set(
+            UserAnswer.objects.filter(user=user, question_id__in=mandatory_question_ids)
+            .values_list('question_id', flat=True)
+        )
+        has_gender_preferences = len(answered_question_ids) >= min(10, len(mandatory_question_ids))
         
         print(f"📊 Onboarding status:")
         print(f"   Personal details: {'✅' if has_personal_details else '❌'}")
         print(f"   Profile photo: {'✅' if has_profile_photo else '❌'}")
-        print(f"   Gender preferences: {'✅' if has_gender_preferences else '❌'}")
+        print(f"   Mandatory questions: {len(answered_question_ids)}/{len(mandatory_question_ids)} answered")
+        print(f"   Questions complete: {'✅' if has_gender_preferences else '❌'}")
         
         # Determine which step user should be on
         if not has_personal_details:
