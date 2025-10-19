@@ -26,7 +26,7 @@ SECRET_KEY = config('SECRET_KEY', default="django-insecure-e19dmrum9tbhk-hnifgx=
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config('DEBUG', default=True, cast=bool)
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0', "*"]
+ALLOWED_HOSTS = ['*']
 
 
 # Application definition
@@ -169,10 +169,9 @@ REST_FRAMEWORK = {
     'MAX_PAGE_SIZE': 1000
 }
 
-# CORS settings (development: allow any origin; tighten for production)
+# CORS settings — allow all origins by default
 CORS_ALLOW_ALL_ORIGINS = True
-
-CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_CREDENTIALS = config('CORS_ALLOW_CREDENTIALS', default=False, cast=bool)
 
 # CORS headers
 CORS_ALLOW_HEADERS = [
