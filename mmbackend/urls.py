@@ -18,9 +18,18 @@ from django.contrib import admin
 from django.urls import path, include
 from rest_framework.documentation import include_docs_urls
 
+docs_urlpatterns = []
+try:
+    import coreapi  # noqa: F401
+except ImportError:
+    docs_urlpatterns = []
+else:
+    docs_urlpatterns = [path("docs/", include_docs_urls(title="MM Backend API"))]
+
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", include("api.urls")),
     path("api-auth/", include("rest_framework.urls")),
-    path("docs/", include_docs_urls(title="MM Backend API")),
 ]
+
+urlpatterns += docs_urlpatterns
