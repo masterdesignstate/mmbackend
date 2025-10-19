@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 from .models import (
     User, Tag, Question, UserAnswer, Compatibility,
-    UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag
+    UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, Controls
 )
 from .services.compatibility_service import CompatibilityService
 from .serializers import (
@@ -20,8 +20,9 @@ from .serializers import (
     CompatibilitySerializer, UserResultSerializer, MessageSerializer,
     PictureModerationSerializer, UserReportSerializer, UserOnlineStatusSerializer,
     DetailedUserSerializer, DetailedQuestionSerializer, UserTagSerializer,
-    SimpleUserSerializer,
+    SimpleUserSerializer, ControlsSerializer,
 )
+from .permissions import IsDashboardAdmin
 
 
 class UserViewSet(viewsets.ModelViewSet):
@@ -164,6 +165,13 @@ class UserViewSet(viewsets.ModelViewSet):
         if not query or len(query) < 2:
             return Response({'results': []})
 
+        # Optional result limit
+        try:
+            limit = int(request.query_params.get('limit', 10))
+        except ValueError:
+            limit = 10
+        limit = max(1, min(limit, 25))
+
         # Search across multiple fields
         users = User.objects.filter(
             Q(first_name__icontains=query) |
@@ -171,7 +179,7 @@ class UserViewSet(viewsets.ModelViewSet):
             Q(username__icontains=query) |
             Q(email__icontains=query),
             is_banned=False
-        ).distinct()[:10]  # Limit to 10 results
+        ).distinct()[:limit]
 
         serializer = self.get_serializer(users, many=True)
         return Response({'results': serializer.data})
@@ -412,6 +420,24 @@ class UserViewSet(viewsets.ModelViewSet):
                         tag_filtered_user_ids.update(matched_user_ids)
                         print(f"🔍 Found {len(matched_user_ids)} matched users")
                         
+                    elif tag_lower == 'saved':
+                        # Users I have saved
+                        saved_user_ids = UserResult.objects.filter(
+                            user=request.user,
+                            tag='save'
+                        ).values_list('result_user_id', flat=True)
+                        tag_filtered_user_ids.update(saved_user_ids)
+                        print(f"🔍 Found {len(saved_user_ids)} saved users")
+                        
+                    elif tag_lower == 'hidden':
+                        # Users I have hidden
+                        hidden_user_ids = UserResult.objects.filter(
+                            user=request.user,
+                            tag='hide'
+                        ).values_list('result_user_id', flat=True)
+                        tag_filtered_user_ids.update(hidden_user_ids)
+                        print(f"🔍 Found {len(hidden_user_ids)} hidden users")
+                        
                     else:
                         # Handle other tags
                         other_tag_user_ids = UserResult.objects.filter(
@@ -589,10 +615,23 @@ class QuestionViewSet(viewsets.ModelViewSet):
                 return Response({
                     'error': 'Question text is required'
                 }, status=status.HTTP_400_BAD_REQUEST)
-            
+
             if len(text) > 100:  # Updated to match frontend limit
                 return Response({
                     'error': 'Question text must be less than 100 characters'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Validate for restricted words
+            from api.utils.word_filter import validate_text_fields
+
+            has_restricted, found_words = validate_text_fields(
+                text=text,
+                question_name=question_name
+            )
+
+            if has_restricted:
+                return Response({
+                    'error': f'Your question contains restricted words: {", ".join(found_words)}'
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             if not tags:
@@ -778,6 +817,42 @@ class QuestionViewSet(viewsets.ModelViewSet):
             logger.error(f"Error updating question: {e}")
             return Response({
                 'error': 'Failed to update question'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        """Approve a question (admin only)"""
+        try:
+            question = self.get_object()
+            question.is_approved = True
+            question.save()
+
+            logger.info(f"Question approved: {question.id}")
+
+            serializer = self.get_serializer(question)
+            return Response(serializer.data)
+        except Exception as e:
+            logger.error(f"Error approving question: {e}")
+            return Response({
+                'error': 'Failed to approve question'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        """Reject a question (admin only)"""
+        try:
+            question = self.get_object()
+            question.is_approved = False
+            question.save()
+
+            logger.info(f"Question rejected: {question.id}")
+
+            serializer = self.get_serializer(question)
+            return Response(serializer.data)
+        except Exception as e:
+            logger.error(f"Error rejecting question: {e}")
+            return Response({
+                'error': 'Failed to reject question'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=False, methods=['get'])
@@ -1286,6 +1361,11 @@ class PictureModerationViewSet(viewsets.ModelViewSet):
         # Format data for frontend
         queue_data = []
         for moderation in moderations:
+            # Use picture_url if available, otherwise fall back to picture.url
+            picture_url = moderation.picture_url
+            if not picture_url and moderation.picture:
+                picture_url = moderation.picture.url
+
             queue_data.append({
                 'id': moderation.id,
                 'user': {
@@ -1293,9 +1373,9 @@ class PictureModerationViewSet(viewsets.ModelViewSet):
                     'first_name': moderation.user.first_name,
                     'last_name': moderation.user.last_name,
                     'email': moderation.user.email,
-                    'profile_photo': moderation.user.profile_photo.url if moderation.user.profile_photo else None,
+                    'profile_photo': moderation.user.profile_photo,
                 },
-                'picture': moderation.picture.url if moderation.picture else None,
+                'picture': picture_url,
                 'submitted_date': moderation.submitted_at,
                 'status': moderation.status,
                 'moderation_reason': moderation.moderator_notes,
@@ -1310,13 +1390,25 @@ class PictureModerationViewSet(viewsets.ModelViewSet):
         # Removed staff requirement for testing
         # if not request.user.is_staff:
         #     return Response({'error': 'Staff only'}, status=403)
-        
+
         moderation = self.get_object()
+
+        # Update user's profile photo with the approved picture URL
+        if moderation.picture_url:
+            user = moderation.user
+            user.profile_photo = moderation.picture_url
+            user.save()
+            print(f"✅ Updated user {user.id} profile_photo to: {moderation.picture_url}")
+
         moderation.status = 'approved'
         moderation.moderated_at = timezone.now()
         moderation.save()
-        
-        return Response({'status': 'approved'})
+
+        return Response({
+            'status': 'approved',
+            'user_id': str(moderation.user.id),
+            'picture_url': moderation.picture_url
+        })
 
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
@@ -1451,5 +1543,120 @@ class UserReportViewSet(viewsets.ModelViewSet):
             report.save()
             
             return Response({'status': 'permanently_banned'})
-        
+
         return Response({'error': 'Invalid action'}, status=400)
+
+
+class StatsViewSet(viewsets.ViewSet):
+    """Dashboard statistics endpoint"""
+    permission_classes = [permissions.IsAuthenticated, IsDashboardAdmin]
+
+    @action(detail=False, methods=['get'])
+    def dashboard(self, request):
+        """Get dashboard statistics"""
+        from datetime import datetime, timedelta
+
+        # Calculate time ranges
+        now = timezone.now()
+        day_ago = now - timedelta(days=1)
+        week_ago = now - timedelta(days=7)
+        month_ago = now - timedelta(days=30)
+        year_ago = now - timedelta(days=365)
+
+        # Total users
+        total_users = User.objects.count()
+
+        # Active users (based on last_seen)
+        daily_active = User.objects.filter(last_seen__gte=day_ago).count()
+        weekly_active = User.objects.filter(last_seen__gte=week_ago).count()
+        monthly_active = User.objects.filter(last_seen__gte=month_ago).count()
+
+        # New users this year
+        new_users_this_year = User.objects.filter(date_joined__gte=year_ago).count()
+
+        # Total interactions
+        total_matches = UserResult.objects.filter(tag='matched').count()
+        total_likes = UserResult.objects.filter(tag='like').count()
+        total_approves = UserResult.objects.filter(tag='approve').count()
+
+        return Response({
+            'total_users': total_users,
+            'daily_active_users': daily_active,
+            'weekly_active_users': weekly_active,
+            'monthly_active_users': monthly_active,
+            'new_users_this_year': new_users_this_year,
+            'total_matches': total_matches,
+            'total_likes': total_likes,
+            'total_approves': total_approves
+        })
+
+    @action(detail=False, methods=['get'])
+    def timeseries(self, request):
+        """Get time-series data for charts"""
+        from datetime import timedelta
+        from api.models import DailyMetric
+
+        # Get period parameter (default: 30 days)
+        period = request.query_params.get('period', '30')
+        try:
+            days = int(period)
+        except ValueError:
+            days = 30
+
+        # Get metrics for the specified period
+        end_date = timezone.now().date()
+        start_date = end_date - timedelta(days=days)
+
+        metrics = DailyMetric.objects.filter(
+            date__gte=start_date,
+            date__lte=end_date
+        ).order_by('date')
+
+        # Format data for frontend
+        data = []
+        for metric in metrics:
+            data.append({
+                'date': metric.date.isoformat(),
+                'users': metric.active_users,
+                'approves': metric.total_approves,
+                'likes': metric.total_likes,
+                'matches': metric.total_matches,
+                'new_users': metric.new_users,
+            })
+
+        return Response({
+            'period': days,
+            'start_date': start_date.isoformat(),
+            'end_date': end_date.isoformat(),
+            'data': data
+        })
+
+
+class ControlsViewSet(viewsets.ModelViewSet):
+    """ViewSet for managing Controls (app-wide configuration)"""
+    serializer_class = ControlsSerializer
+    permission_classes = [permissions.IsAuthenticated, IsDashboardAdmin]
+
+    def get_queryset(self):
+        return Controls.objects.all()
+
+    @action(detail=False, methods=['get'])
+    def current(self, request):
+        """Get the current/active controls (creates default if none exists)"""
+        controls = Controls.get_current()
+        serializer = self.get_serializer(controls)
+        return Response(serializer.data)
+
+    def update(self, request, *args, **kwargs):
+        """Update controls values"""
+        # Get the current controls or the one being updated
+        if kwargs.get('pk'):
+            instance = self.get_object()
+        else:
+            instance = Controls.get_current()
+
+        serializer = self.get_serializer(instance, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        return Response(serializer.data)

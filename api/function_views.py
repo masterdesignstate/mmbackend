@@ -10,15 +10,9 @@ from django.utils import timezone
 from django.conf import settings
 from datetime import datetime
 from .models import User
+from .utils.admin_utils import ensure_dashboard_admin
 
 logger = logging.getLogger(__name__)
-
-
-ADMIN_EMAILS = {
-    email.strip().lower()
-    for email in getattr(settings, 'ADMIN_EMAILS', [])
-    if isinstance(email, str) and email.strip()
-}
 
 
 @csrf_exempt
@@ -232,7 +226,25 @@ def user_personal_details(request):
             }, status=409)
         
         print(f"✅ Username available: {username}")
-        
+
+        # Validate for restricted words
+        from api.utils.word_filter import validate_text_fields
+
+        has_restricted, found_words = validate_text_fields(
+            username=username,
+            full_name=data.get('full_name'),
+            tagline=data.get('tagline'),
+            bio=data.get('bio')
+        )
+
+        if has_restricted:
+            print(f"❌ Restricted words found: {found_words}")
+            return JsonResponse({
+                'error': f'Your profile contains restricted words: {", ".join(found_words)}'
+            }, status=400)
+
+        print(f"✅ No restricted words found in profile fields")
+
         # Extract height components if provided
         height_cm = None
         height = data.get('height', '')
@@ -438,7 +450,7 @@ def user_login(request):
         
         print(f"✅ Authentication successful!")
         print(f"   Authenticated user: {user.id} - {user.email}")
-        is_admin_user = (user.email or "").strip().lower() in ADMIN_EMAILS
+        is_admin_user = ensure_dashboard_admin(user)
         if is_admin_user:
             print(f"🛡️ Admin access granted for: {user.email}")
 
@@ -587,7 +599,7 @@ def check_onboarding_status(request):
             return JsonResponse({'error': 'User not found'}, status=404)
 
         print(f"✅ User found: {user.username} (ID: {user.id})")
-        is_admin_user = (user.email or '').strip().lower() in ADMIN_EMAILS
+        is_admin_user = ensure_dashboard_admin(user)
         if is_admin_user:
             print(f"🛡️ Admin user detected for onboarding bypass: {user.email}")
             response_data = {
@@ -709,20 +721,31 @@ def update_profile_photo(request):
         # Update profile photo URL
         old_photo_url = user.profile_photo
         user.profile_photo = profile_photo_url
-        
+
         print(f"📸 Profile photo update:")
         print(f"   Old URL: {old_photo_url}")
         print(f"   New URL: {user.profile_photo}")
-        
+
         # Save the user
         user.save()
-        
+
+        # Create PictureModeration record for the uploaded photo
+        from .models import PictureModeration
+        moderation = PictureModeration.objects.create(
+            user=user,
+            picture_url=profile_photo_url,
+            status='pending'
+        )
+
+        print(f"📋 Created PictureModeration record: {moderation.id} (status: {moderation.status})")
         print(f"✅ PROFILE PHOTO UPDATED successfully for user: {user_id}")
-        
+
         response_data = {
             'success': True,
-            'message': 'Profile photo updated successfully',
-            'profile_photo_url': profile_photo_url
+            'message': 'Profile photo updated successfully and submitted for moderation',
+            'profile_photo_url': profile_photo_url,
+            'moderation_id': str(moderation.id),
+            'moderation_status': moderation.status
         }
         
         print(f"📤 Sending response: {response_data}")

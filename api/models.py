@@ -19,6 +19,10 @@ class User(AbstractUser):
     is_online = models.BooleanField(default=False)
     last_seen = models.DateTimeField(default=timezone.now)
     is_banned = models.BooleanField(default=False)
+    is_admin = models.BooleanField(
+        default=False,
+        help_text="Grants access to internal dashboard features."
+    )
     ban_reason = models.TextField(blank=True)
     ban_date = models.DateTimeField(null=True, blank=True)
     questions_answered_count = models.PositiveIntegerField(default=0)
@@ -227,16 +231,17 @@ class PictureModeration(models.Model):
         ('approved', 'Approved'),
         ('rejected', 'Rejected'),
     ]
-    
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='picture_moderations')
-    picture = models.ImageField(upload_to='moderation_queue/')
+    picture = models.ImageField(upload_to='moderation_queue/', null=True, blank=True)
+    picture_url = models.URLField(max_length=500, null=True, blank=True, help_text="Azure Blob Storage URL for the picture")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     moderator_notes = models.TextField(blank=True)
     submitted_at = models.DateTimeField(auto_now_add=True)
     moderated_at = models.DateTimeField(null=True, blank=True)
     moderated_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='moderated_pictures')
-    
+
     def __str__(self):
         return f"{self.user.username} - {self.status}"
 
@@ -344,3 +349,62 @@ class Controls(models.Model):
             }
         )
         return controls
+
+
+class DailyMetric(models.Model):
+    """Daily aggregated metrics for dashboard charts"""
+    date = models.DateField(unique=True, db_index=True)
+
+    # User metrics
+    total_users = models.IntegerField(default=0)
+    new_users = models.IntegerField(default=0)
+    active_users = models.IntegerField(default=0)  # Users who logged in that day
+
+    # Activity metrics
+    total_approves = models.IntegerField(default=0)
+    total_likes = models.IntegerField(default=0)
+    total_matches = models.IntegerField(default=0)
+
+    # Engagement metrics
+    questions_answered = models.IntegerField(default=0)
+    messages_sent = models.IntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'daily_metrics'
+        ordering = ['-date']
+
+    def __str__(self):
+        return f"Metrics for {self.date}"
+
+
+class RestrictedWord(models.Model):
+    """Words that are not allowed in user-generated content"""
+    SEVERITY_CHOICES = [
+        ('high', 'High'),
+        ('medium', 'Medium'),
+        ('low', 'Low'),
+    ]
+
+    word = models.CharField(max_length=100, unique=True, db_index=True, help_text="Restricted word (stored in lowercase)")
+    severity = models.CharField(max_length=10, choices=SEVERITY_CHOICES, default='high', help_text="Severity level of the restriction")
+    is_active = models.BooleanField(default=True, db_index=True, help_text="Whether this restriction is currently active")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'restricted_words'
+        ordering = ['word']
+        indexes = [
+            models.Index(fields=['is_active', 'word'], name='restricted_word_active_idx'),
+        ]
+
+    def save(self, *args, **kwargs):
+        # Always store words in lowercase for case-insensitive matching
+        self.word = self.word.lower().strip()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.word} ({self.severity})"

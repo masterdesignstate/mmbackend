@@ -3,7 +3,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     UserViewSet, TagViewSet, QuestionViewSet, UserAnswerViewSet,
     CompatibilityViewSet, UserResultViewSet, MessageViewSet,
-    PictureModerationViewSet, UserReportViewSet, UserTagViewSet
+    PictureModerationViewSet, UserReportViewSet, UserTagViewSet, StatsViewSet, ControlsViewSet
 )
 from .function_views import (
     user_signup, user_personal_details, user_login, check_user_exists, check_onboarding_status, update_profile_photo, upload_photo, test_endpoint, delete_question
@@ -20,6 +20,8 @@ router.register(r'user-tags', UserTagViewSet, basename='user-tag')
 router.register(r'messages', MessageViewSet, basename='message')
 router.register(r'picture-moderation', PictureModerationViewSet, basename='picture-moderation')
 router.register(r'reports', UserReportViewSet, basename='report')
+router.register(r'stats', StatsViewSet, basename='stats')
+router.register(r'controls', ControlsViewSet, basename='controls')
 
 urlpatterns = [
     path('', include(router.urls)),

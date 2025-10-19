@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from .models import (
-    User, Tag, Question, UserAnswer, Compatibility, 
-    UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, QuestionAnswer
+    User, Tag, Question, UserAnswer, Compatibility,
+    UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, QuestionAnswer, Controls
 )
 
 
@@ -13,21 +13,28 @@ class TagSerializer(serializers.ModelSerializer):
 
 class UserSerializer(serializers.ModelSerializer):
     online_status = serializers.SerializerMethodField()
-    
+    question_answers = serializers.SerializerMethodField()
+    date_joined = serializers.DateTimeField(read_only=True)
+    is_banned = serializers.BooleanField(read_only=True)
+
     class Meta:
         model = User
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name',
             'profile_photo', 'age', 'date_of_birth', 'height', 'from_location', 'live', 'tagline', 'bio',
-            'is_online', 'last_seen', 'questions_answered_count', 'online_status'
+            'is_online', 'last_seen', 'questions_answered_count', 'online_status', 'question_answers',
+            'date_joined', 'is_banned', 'is_admin'
         ]
-        read_only_fields = ['id', 'is_online', 'last_seen', 'questions_answered_count']
-    
+        read_only_fields = [
+            'id', 'is_online', 'last_seen', 'questions_answered_count',
+            'date_joined', 'is_banned', 'is_admin'
+        ]
+
     def get_online_status(self, obj):
         # Check if user is authenticated and not AnonymousUser
         if not hasattr(obj, 'online_status') or obj.is_anonymous:
             return None
-            
+
         try:
             return {
                 'is_online': obj.online_status.is_online,
@@ -36,6 +43,35 @@ class UserSerializer(serializers.ModelSerializer):
             }
         except UserOnlineStatus.DoesNotExist:
             return None
+
+    def get_question_answers(self, obj):
+        """Get answers for specific questions by question number"""
+        # Get answers for questions 1-6 (Male, Female, Friend, Hookup, Date, Partner)
+        answers = UserAnswer.objects.filter(
+            user=obj,
+            question__question_number__in=[1, 2, 3, 4, 5, 6]
+        ).select_related('question').values(
+            'question__question_number',
+            'me_answer'
+        )
+
+        # Map to question names
+        answer_map = {}
+        for answer in answers:
+            qnum = answer['question__question_number']
+            # Map question numbers to their names
+            question_names = {
+                1: 'male',
+                2: 'female',
+                3: 'friend',
+                4: 'hookup',
+                5: 'date',
+                6: 'partner'
+            }
+            if qnum in question_names:
+                answer_map[question_names[qnum]] = answer['me_answer']
+
+        return answer_map
 
 
 class QuestionAnswerSerializer(serializers.ModelSerializer):
@@ -204,4 +240,12 @@ class CompactCompatibilityResultSerializer(serializers.Serializer):
     overall_compatibility = serializers.FloatField()
     compatible_with_me = serializers.FloatField()
     im_compatible_with = serializers.FloatField()
-    mutual_questions_count = serializers.IntegerField() 
+    mutual_questions_count = serializers.IntegerField()
+
+
+class ControlsSerializer(serializers.ModelSerializer):
+    """Serializer for Controls model"""
+    class Meta:
+        model = Controls
+        fields = ['id', 'adjust', 'exponent', 'ota', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at'] 

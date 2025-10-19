@@ -26,7 +26,7 @@ SECRET_KEY = config('SECRET_KEY', default="django-insecure-e19dmrum9tbhk-hnifgx=
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config('DEBUG', default=True, cast=bool)
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0']
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0', "*"]
 
 
 # Application definition
@@ -169,11 +169,8 @@ REST_FRAMEWORK = {
     'MAX_PAGE_SIZE': 1000
 }
 
-# CORS settings
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
+# CORS settings (development: allow any origin; tighten for production)
+CORS_ALLOW_ALL_ORIGINS = True
 
 CORS_ALLOW_CREDENTIALS = True
 
@@ -196,7 +193,7 @@ USE_AZURE_STORAGE = config('AZURE_ACCOUNT_NAME', default=None) is not None
 # Admin dashboard access
 ADMIN_EMAILS = [
     email.strip().lower()
-    for email in config('ADMIN_EMAILS', default='atomsable@gmail.com').split(',')
+    for email in config('ADMIN_EMAILS', default='admin@matchmatical.com').split(',')
     if email.strip()
 ]
 
