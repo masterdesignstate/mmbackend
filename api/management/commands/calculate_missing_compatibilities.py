@@ -42,16 +42,29 @@ class Command(BaseCommand):
 
         self.stdout.write(f'📊 Found {total_users} users')
 
-        # Get all existing compatibility user pairs to avoid checking them
-        existing_pairs = set()
-        for comp in Compatibility.objects.only('user1_id', 'user2_id').iterator(chunk_size=1000):
-            # Store both directions
+        # Get all existing compatibilities with timestamps and user answer updates
+        # We need to recalculate if either user has updated answers since last calculation
+        from django.db.models import Max
+
+        # Get the latest answer update time for each user
+        user_last_answer_update = {}
+        for user in users:
+            latest_answer = user.answers.aggregate(Max('updated_at'))['updated_at__max']
+            user_last_answer_update[str(user.id)] = latest_answer
+
+        # Load existing compatibilities with their last_calculated timestamp
+        existing_compatibilities = {}
+        for comp in Compatibility.objects.select_related('user1', 'user2').iterator(chunk_size=1000):
             pair = tuple(sorted([str(comp.user1_id), str(comp.user2_id)]))
-            existing_pairs.add(pair)
+            existing_compatibilities[pair] = {
+                'last_calculated': comp.last_calculated,
+                'compatibility': comp
+            }
 
-        self.stdout.write(f'📊 Found {len(existing_pairs)} existing compatibility pairs')
+        self.stdout.write(f'📊 Found {len(existing_compatibilities)} existing compatibility records')
 
-        # Find missing compatibilities
+        # Find missing or stale compatibilities
+        needs_update = 0
         for i, user1 in enumerate(users):
             # Check timeout
             elapsed = time.time() - start_time
@@ -73,25 +86,52 @@ class Command(BaseCommand):
                 if created_pairs >= max_pairs:
                     break
 
-                # Check if this pair already exists (using our pre-loaded set)
+                # Check if this pair needs calculation
                 pair = tuple(sorted([str(user1.id), str(user2.id)]))
-                if pair in existing_pairs:
+
+                # Check if compatibility exists and if it's stale
+                needs_calculation = False
+                existing_comp = existing_compatibilities.get(pair)
+
+                if not existing_comp:
+                    # No compatibility exists - need to create
+                    needs_calculation = True
+                else:
+                    # Check if either user has updated answers since last calculation
+                    last_calc = existing_comp['last_calculated']
+                    user1_updated = user_last_answer_update.get(str(user1.id))
+                    user2_updated = user_last_answer_update.get(str(user2.id))
+
+                    # Recalculate if either user has newer answers
+                    if (user1_updated and user1_updated > last_calc) or \
+                       (user2_updated and user2_updated > last_calc):
+                        needs_calculation = True
+                        needs_update += 1
+
+                if not needs_calculation:
                     skipped_pairs += 1
                     continue
 
-                # Calculate compatibility for missing pair
+                # Calculate or recalculate compatibility
                 try:
                     compatibility_data = CompatibilityService.calculate_compatibility_between_users(
                         user1, user2
                     )
 
-                    Compatibility.objects.create(
-                        user1=user1,
-                        user2=user2,
-                        **compatibility_data
-                    )
-                    # Add to existing pairs so we don't recalculate
-                    existing_pairs.add(pair)
+                    if existing_comp:
+                        # Update existing record
+                        comp_obj = existing_comp['compatibility']
+                        for key, value in compatibility_data.items():
+                            setattr(comp_obj, key, value)
+                        comp_obj.save()  # This updates last_calculated automatically
+                    else:
+                        # Create new record
+                        Compatibility.objects.create(
+                            user1=user1,
+                            user2=user2,
+                            **compatibility_data
+                        )
+
                     created_pairs += 1
 
                     # Progress update every 10 pairs
@@ -99,7 +139,7 @@ class Command(BaseCommand):
                         elapsed = time.time() - start_time
                         rate = created_pairs / elapsed if elapsed > 0 else 0
                         self.stdout.write(
-                            f'✅ Created {created_pairs} pairs ({rate:.1f} pairs/sec, {elapsed:.1f}s elapsed)'
+                            f'✅ Processed {created_pairs} pairs ({rate:.1f} pairs/sec, {elapsed:.1f}s elapsed)'
                         )
 
                 except Exception as e:
@@ -113,8 +153,10 @@ class Command(BaseCommand):
 
         self.stdout.write('─' * 50)
         self.stdout.write(self.style.SUCCESS('🎉 Incremental calculation completed!'))
-        self.stdout.write(f'✅ New compatibilities created: {created_pairs}')
-        self.stdout.write(f'⏭️  Existing compatibilities skipped: {skipped_pairs}')
+        self.stdout.write(f'✅ Compatibilities processed: {created_pairs}')
+        if needs_update > 0:
+            self.stdout.write(f'🔄 Stale compatibilities updated: {needs_update}')
+        self.stdout.write(f'⏭️  Up-to-date compatibilities skipped: {skipped_pairs}')
         self.stdout.write(f'⏱️  Total time: {duration:.2f} seconds')
 
         # Check remaining work
