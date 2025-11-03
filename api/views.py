@@ -1,7 +1,7 @@
 from rest_framework import viewsets, permissions, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from django.db.models import Q, Count
+from django.db.models import Q, Count, F
 from django.utils import timezone
 from datetime import timedelta
 import logging
@@ -15,7 +15,7 @@ from .models import (
     UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, Controls
 )
 from .services.compatibility_service import CompatibilityService
-from .services.compatibility_queue import enqueue_user_for_recalculation
+from .services.compatibility_queue import enqueue_user_for_recalculation, should_enqueue_after_answer
 from .serializers import (
     UserSerializer, TagSerializer, QuestionSerializer, UserAnswerSerializer,
     CompatibilitySerializer, UserResultSerializer, MessageSerializer,
@@ -1097,13 +1097,28 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
                 }
             )
 
-            # Refresh question count and ensure compatibility recompute is queued when appropriate
-            answer_count = UserAnswer.objects.filter(user=user).count()
-            if user.questions_answered_count != answer_count:
-                user.questions_answered_count = answer_count
-                user.save(update_fields=['questions_answered_count'])
+            # Maintain answered count and determine whether to enqueue a compatibility job
+            if created:
+                User.objects.filter(id=user.id).update(
+                    questions_answered_count=F('questions_answered_count') + 1
+                )
+                user.refresh_from_db(fields=['questions_answered_count'])
+            elif user.questions_answered_count == 0:
+                actual_count = UserAnswer.objects.filter(user=user).count()
+                if actual_count != user.questions_answered_count:
+                    User.objects.filter(id=user.id).update(
+                        questions_answered_count=actual_count
+                    )
+                    user.questions_answered_count = actual_count
 
-            enqueue_user_for_recalculation(user)
+            should_enqueue, force_enqueue = should_enqueue_after_answer(
+                question_id=str(question.id),
+                user=user,
+                created=created,
+            )
+
+            if should_enqueue:
+                enqueue_user_for_recalculation(user, force=force_enqueue)
             
             serializer = self.get_serializer(user_answer)
             status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
