@@ -15,6 +15,7 @@ from .models import (
     UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, Controls
 )
 from .services.compatibility_service import CompatibilityService
+from .services.compatibility_queue import enqueue_user_for_recalculation
 from .serializers import (
     UserSerializer, TagSerializer, QuestionSerializer, UserAnswerSerializer,
     CompatibilitySerializer, UserResultSerializer, MessageSerializer,
@@ -530,6 +531,12 @@ class QuestionViewSet(viewsets.ModelViewSet):
         # Use prefetch_related to optimize queries for tags and related objects
         queryset = Question.objects.all().prefetch_related('tags').select_related('submitted_by')
 
+        # Filter by is_approved=True by default (hide unapproved questions from public)
+        # Allow override via query param for admin endpoints
+        include_unapproved = self.request.query_params.get('include_unapproved', 'false').lower() == 'true'
+        if not include_unapproved:
+            queryset = queryset.filter(is_approved=True)
+
         # Filter by is_mandatory if specified
         is_mandatory = self.request.query_params.get('is_mandatory')
         if is_mandatory is not None:
@@ -592,6 +599,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
         try:
             # Extract data from request
             text = request.data.get('text', '').strip()
+            user_id = request.data.get('user_id')  # Get user_id from frontend
             question_name = request.data.get('question_name', '').strip()
             question_number = request.data.get('question_number')
             group_number = request.data.get('group_number')
@@ -654,6 +662,19 @@ class QuestionViewSet(viewsets.ModelViewSet):
                     'error': 'Value label 5 is required'
                 }, status=status.HTTP_400_BAD_REQUEST)
             
+            # Get the user object if user_id is provided
+            submitted_by_user = None
+            if user_id:
+                try:
+                    from django.contrib.auth import get_user_model
+                    User = get_user_model()
+                    submitted_by_user = User.objects.get(id=user_id)
+                    logger.info(f"Found user for question submission: {submitted_by_user.username}")
+                except User.DoesNotExist:
+                    logger.warning(f"User ID {user_id} not found, question will have no submitter")
+            elif request.user.is_authenticated:
+                submitted_by_user = request.user
+            
             # Create the question
             question_data = {
                 'text': text,
@@ -665,7 +686,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
                 'question_type': question_type,
                 'is_required_for_match': is_required_for_match,
                 'is_mandatory': is_mandatory,
-                'submitted_by': request.user if request.user.is_authenticated else None,
+                'submitted_by': submitted_by_user,
                 'is_approved': is_approved,
                 'skip_me': skip_me,
                 'skip_looking_for': skip_looking_for,
@@ -907,15 +928,16 @@ class QuestionViewSet(viewsets.ModelViewSet):
             return Response(cached_data)
 
         # Get distinct question numbers using database aggregation (fast with index)
-        distinct_numbers = Question.objects.values('question_number').distinct().order_by('question_number')
+        # Only include approved questions
+        distinct_numbers = Question.objects.filter(is_approved=True).values('question_number').distinct().order_by('question_number')
         question_numbers = [item['question_number'] for item in distinct_numbers]
 
         # Calculate answer counts efficiently using aggregation
         answer_counts = {}
 
-        # Group questions by question_number
+        # Group questions by question_number (only approved questions)
         questions_by_number = {}
-        questions = Question.objects.all().prefetch_related('user_answers')
+        questions = Question.objects.filter(is_approved=True).prefetch_related('user_answers')
 
         for question in questions:
             if question.question_number not in questions_by_number:
@@ -1074,6 +1096,14 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
                     'looking_for_share': looking_for_share,
                 }
             )
+
+            # Refresh question count and ensure compatibility recompute is queued when appropriate
+            answer_count = UserAnswer.objects.filter(user=user).count()
+            if user.questions_answered_count != answer_count:
+                user.questions_answered_count = answer_count
+                user.save(update_fields=['questions_answered_count'])
+
+            enqueue_user_for_recalculation(user)
             
             serializer = self.get_serializer(user_answer)
             status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK

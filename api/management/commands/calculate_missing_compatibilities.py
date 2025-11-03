@@ -1,19 +1,23 @@
-from django.core.management.base import BaseCommand
-from django.db.models import Q
-from api.models import User, Compatibility
-from api.services.compatibility_service import CompatibilityService
 import time
+
+from django.core.management.base import BaseCommand
+from django.db import transaction
+from django.utils import timezone
+
+from api.models import CompatibilityJob
+from api.services.compatibility_queue import MIN_MATCHABLE_ANSWERS
+from api.services.compatibility_service import CompatibilityService
 
 
 class Command(BaseCommand):
-    help = 'Calculate missing compatibility scores incrementally (for scheduled jobs with time limits)'
+    help = 'Process pending compatibility jobs incrementally (designed for short scheduled runs)'
 
     def add_arguments(self, parser):
         parser.add_argument(
             '--max-pairs',
             type=int,
             default=100,
-            help='Maximum number of pairs to process in this run',
+            help='Maximum number of compatibility jobs to process in this run',
         )
         parser.add_argument(
             '--timeout',
@@ -24,150 +28,97 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         start_time = time.time()
-        max_pairs = options['max_pairs']
+        max_jobs = max(1, options['max_pairs'])
         timeout = options['timeout']
 
-        self.stdout.write(self.style.SUCCESS(f'🚀 Starting incremental compatibility calculation...'))
-        self.stdout.write(f'⏱️  Max time: {timeout}s, Max pairs: {max_pairs}')
+        self.stdout.write(self.style.SUCCESS('🚀 Starting compatibility job processor...'))
+        self.stdout.write(f'⏱️  Max time: {timeout}s, Max jobs: {max_jobs}')
 
-        # Get all users with answers
-        users = list(User.objects.exclude(is_banned=True).filter(
-            answers__isnull=False
-        ).distinct().order_by('id'))
+        processed_jobs = 0
+        successful_jobs = 0
+        skipped_jobs = 0
+        failed_jobs = 0
+        total_pairs_created = 0
 
-        total_users = len(users)
-        processed_pairs = 0
-        created_pairs = 0
-        skipped_pairs = 0
+        pending_queryset = (
+            CompatibilityJob.objects
+            .select_related('user')
+            .filter(status=CompatibilityJob.STATUS_PENDING)
+            .order_by('created_at')
+        )
 
-        self.stdout.write(f'📊 Found {total_users} users')
+        for job in pending_queryset.iterator():
+            if processed_jobs >= max_jobs:
+                self.stdout.write(self.style.WARNING(f'📦 Max jobs limit reached ({max_jobs}), stopping...'))
+                break
 
-        # Get all existing compatibilities with timestamps and user answer updates
-        # We need to recalculate if either user has updated answers since last calculation
-        from django.db.models import Max
-
-        # Get the latest answer update time for each user
-        user_last_answer_update = {}
-        for user in users:
-            latest_answer = user.answers.aggregate(Max('updated_at'))['updated_at__max']
-            user_last_answer_update[str(user.id)] = latest_answer
-
-        # Load existing compatibilities with their last_calculated timestamp
-        existing_compatibilities = {}
-        for comp in Compatibility.objects.select_related('user1', 'user2').iterator(chunk_size=1000):
-            pair = tuple(sorted([str(comp.user1_id), str(comp.user2_id)]))
-            existing_compatibilities[pair] = {
-                'last_calculated': comp.last_calculated,
-                'compatibility': comp
-            }
-
-        self.stdout.write(f'📊 Found {len(existing_compatibilities)} existing compatibility records')
-
-        # Find missing or stale compatibilities
-        needs_update = 0
-        for i, user1 in enumerate(users):
-            # Check timeout
             elapsed = time.time() - start_time
             if elapsed >= timeout:
                 self.stdout.write(self.style.WARNING(f'⏰ Timeout reached ({elapsed:.1f}s), stopping...'))
                 break
 
-            # Check max pairs limit
-            if created_pairs >= max_pairs:
-                self.stdout.write(self.style.WARNING(f'📦 Max pairs limit reached ({max_pairs}), stopping...'))
-                break
+            user = job.user
 
-            for user2 in users[i+1:]:
-                # Check timeout again (inner loop)
-                elapsed = time.time() - start_time
-                if elapsed >= timeout:
-                    break
+            if user.is_banned:
+                skipped_jobs += 1
+                job.status = CompatibilityJob.STATUS_COMPLETED
+                job.error_message = 'User is banned; skipping compatibility generation'
+                job.save(update_fields=['status', 'error_message', 'updated_at'])
+                continue
 
-                if created_pairs >= max_pairs:
-                    break
+            if user.answers.count() < MIN_MATCHABLE_ANSWERS:
+                skipped_jobs += 1
+                job.status = CompatibilityJob.STATUS_COMPLETED
+                job.error_message = 'Not enough answers to compute compatibility'
+                job.save(update_fields=['status', 'error_message', 'updated_at'])
+                continue
 
-                # Check if this pair needs calculation
-                pair = tuple(sorted([str(user1.id), str(user2.id)]))
+            processed_jobs += 1
 
-                # Check if compatibility exists and if it's stale
-                needs_calculation = False
-                existing_comp = existing_compatibilities.get(pair)
+            with transaction.atomic():
+                job.status = CompatibilityJob.STATUS_PROCESSING
+                job.attempts += 1
+                job.last_attempt_at = timezone.now()
+                job.error_message = ''
+                job.save(update_fields=['status', 'attempts', 'last_attempt_at', 'error_message', 'updated_at'])
 
-                if not existing_comp:
-                    # No compatibility exists - need to create
-                    needs_calculation = True
-                else:
-                    # Check if either user has updated answers since last calculation
-                    last_calc = existing_comp['last_calculated']
-                    user1_updated = user_last_answer_update.get(str(user1.id))
-                    user2_updated = user_last_answer_update.get(str(user2.id))
+            try:
+                pairs_created = CompatibilityService.recalculate_all_compatibilities(user)
+                total_pairs_created += pairs_created
+                successful_jobs += 1
 
-                    # Recalculate if either user has newer answers
-                    if (user1_updated and user1_updated > last_calc) or \
-                       (user2_updated and user2_updated > last_calc):
-                        needs_calculation = True
-                        needs_update += 1
+                job.status = CompatibilityJob.STATUS_COMPLETED
+                job.error_message = ''
+                job.updated_at = timezone.now()
+                job.save(update_fields=['status', 'error_message', 'updated_at'])
 
-                if not needs_calculation:
-                    skipped_pairs += 1
-                    continue
+                self.stdout.write(
+                    f'✅ Processed user {user.username} ({user.id}) - {pairs_created} pairs recalculated'
+                )
+            except Exception as exc:
+                failed_jobs += 1
+                job.status = CompatibilityJob.STATUS_FAILED
+                job.error_message = str(exc)[:500]
+                job.updated_at = timezone.now()
+                job.save(update_fields=['status', 'error_message', 'updated_at'])
 
-                # Calculate or recalculate compatibility
-                try:
-                    compatibility_data = CompatibilityService.calculate_compatibility_between_users(
-                        user1, user2
-                    )
+                self.stderr.write(
+                    f'❌ Failed processing user {user.username} ({user.id}): {exc}'
+                )
 
-                    if existing_comp:
-                        # Update existing record
-                        comp_obj = existing_comp['compatibility']
-                        for key, value in compatibility_data.items():
-                            setattr(comp_obj, key, value)
-                        comp_obj.save()  # This updates last_calculated automatically
-                    else:
-                        # Create new record
-                        Compatibility.objects.create(
-                            user1=user1,
-                            user2=user2,
-                            **compatibility_data
-                        )
-
-                    created_pairs += 1
-
-                    # Progress update every 10 pairs
-                    if created_pairs % 10 == 0:
-                        elapsed = time.time() - start_time
-                        rate = created_pairs / elapsed if elapsed > 0 else 0
-                        self.stdout.write(
-                            f'✅ Processed {created_pairs} pairs ({rate:.1f} pairs/sec, {elapsed:.1f}s elapsed)'
-                        )
-
-                except Exception as e:
-                    self.stderr.write(
-                        f'❌ Error calculating compatibility for {user1.username} <-> {user2.username}: {e}'
-                    )
-
-        # Final statistics
-        end_time = time.time()
-        duration = end_time - start_time
+        duration = time.time() - start_time
+        remaining_jobs = CompatibilityJob.objects.filter(status=CompatibilityJob.STATUS_PENDING).count()
 
         self.stdout.write('─' * 50)
-        self.stdout.write(self.style.SUCCESS('🎉 Incremental calculation completed!'))
-        self.stdout.write(f'✅ Compatibilities processed: {created_pairs}')
-        if needs_update > 0:
-            self.stdout.write(f'🔄 Stale compatibilities updated: {needs_update}')
-        self.stdout.write(f'⏭️  Up-to-date compatibilities skipped: {skipped_pairs}')
-        self.stdout.write(f'⏱️  Total time: {duration:.2f} seconds')
+        self.stdout.write(self.style.SUCCESS('🎉 Compatibility job processing completed!'))
+        self.stdout.write(f'🧮 Jobs processed this run: {processed_jobs}')
+        self.stdout.write(f'   ├─ ✅ Successful: {successful_jobs}')
+        self.stdout.write(f'   ├─ ⏭️  Skipped: {skipped_jobs}')
+        self.stdout.write(f'   └─ ❌ Failed: {failed_jobs}')
+        self.stdout.write(f'🔢 Total pairs recalculated: {total_pairs_created}')
+        self.stdout.write(f'🕒 Elapsed time: {duration:.2f}s')
+        self.stdout.write(f'📬 Jobs still pending: {remaining_jobs}')
 
-        # Check remaining work
-        total_expected = (total_users * (total_users - 1)) // 2
-        total_actual = Compatibility.objects.count()
-        remaining = total_expected - total_actual
-
-        self.stdout.write(f'📊 Database status:')
-        self.stdout.write(f'   Total compatibility records: {total_actual}/{total_expected}')
-        self.stdout.write(f'   Coverage: {(total_actual/total_expected*100) if total_expected > 0 else 0:.1f}%')
-        if remaining > 0:
-            self.stdout.write(f'   ⚠️  Still missing: {remaining} pairs (run again to continue)')
-        else:
-            self.stdout.write(self.style.SUCCESS('   ✅ All compatibilities calculated!'))
+        if failed_jobs > 0:
+            self.stdout.write(self.style.WARNING('⚠️  Some jobs failed. Check logs for details.'))
+*** End Patch
