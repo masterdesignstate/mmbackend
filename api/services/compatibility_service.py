@@ -3,6 +3,7 @@ from functools import lru_cache
 from typing import Dict, List, Tuple, Optional
 from django.db.models import Q
 from django.core.cache import cache
+from django.db import IntegrityError
 from ..models import User, UserAnswer, Compatibility, Controls
 
 
@@ -314,14 +315,26 @@ class CompatibilityService:
         for other_user in other_users:
             compatibility_data = CompatibilityService.calculate_compatibility_between_users(user, other_user)
 
-            Compatibility.objects.create(
-                user1=user,
-                user2=other_user,
-                overall_compatibility=compatibility_data['overall_compatibility'],
-                compatible_with_me=compatibility_data['compatible_with_me'],
-                im_compatible_with=compatibility_data['im_compatible_with'],
-                mutual_questions_count=compatibility_data['mutual_questions_count']
-            )
-            created_count += 1
+            try:
+                _, created = Compatibility.objects.update_or_create(
+                    user1=user,
+                    user2=other_user,
+                    defaults={
+                        'overall_compatibility': compatibility_data['overall_compatibility'],
+                        'compatible_with_me': compatibility_data['compatible_with_me'],
+                        'im_compatible_with': compatibility_data['im_compatible_with'],
+                        'mutual_questions_count': compatibility_data['mutual_questions_count']
+                    }
+                )
+                if created:
+                    created_count += 1
+            except IntegrityError:
+                # Handle race condition where a concurrent job just created the pair
+                Compatibility.objects.filter(user1=user, user2=other_user).update(
+                    overall_compatibility=compatibility_data['overall_compatibility'],
+                    compatible_with_me=compatibility_data['compatible_with_me'],
+                    im_compatible_with=compatibility_data['im_compatible_with'],
+                    mutual_questions_count=compatibility_data['mutual_questions_count']
+                )
 
         return created_count
