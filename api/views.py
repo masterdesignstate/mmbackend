@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 
 from .models import (
     User, Tag, Question, UserAnswer, Compatibility,
-    UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, Controls
+    UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, Controls,
+    CompatibilityJob,
 )
 from .services.compatibility_service import CompatibilityService
 from .services.compatibility_queue import enqueue_user_for_recalculation, should_enqueue_after_answer
@@ -1119,6 +1120,26 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
 
             if should_enqueue:
                 enqueue_user_for_recalculation(user, force=force_enqueue)
+
+            if should_enqueue and force_enqueue:
+                try:
+                    CompatibilityService.recalculate_all_compatibilities(user)
+                    job = getattr(user, 'compatibility_job', None)
+                    if job:
+                        job.attempts = (job.attempts or 0) + 1
+                        job.status = CompatibilityJob.STATUS_COMPLETED
+                        job.error_message = ''
+                        job.last_attempt_at = timezone.now()
+                        job.save(update_fields=['attempts', 'status', 'error_message', 'last_attempt_at', 'updated_at'])
+                except Exception as exc:
+                    logger.exception(
+                        "Immediate compatibility recompute failed for user %s: %s",
+                        user.id,
+                        exc,
+                    )
+                    # Leave the job pending for the scheduled worker to pick up
+                    if should_enqueue:
+                        enqueue_user_for_recalculation(user, force=force_enqueue)
             
             serializer = self.get_serializer(user_answer)
             status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
