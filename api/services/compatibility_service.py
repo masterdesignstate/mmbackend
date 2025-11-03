@@ -298,15 +298,15 @@ class CompatibilityService:
         return compatible_users[offset:offset + limit]
 
     @staticmethod
-    def recalculate_all_compatibilities(user: User) -> int:
+    def recalculate_all_compatibilities(user: User, use_full_reset: bool = True) -> int:
         """
         Recalculate all compatibilities for a user (useful when their answers change)
         Returns the number of compatibilities updated
         """
-        # Delete existing compatibilities for this user
-        deleted_count = Compatibility.objects.filter(
-            Q(user1=user) | Q(user2=user)
-        ).delete()[0]
+        if use_full_reset:
+            Compatibility.objects.filter(
+                Q(user1=user) | Q(user2=user)
+            ).delete()
 
         # Get all other users
         other_users = User.objects.exclude(id=user.id).exclude(is_banned=True)
@@ -336,5 +336,13 @@ class CompatibilityService:
                     im_compatible_with=compatibility_data['im_compatible_with'],
                     mutual_questions_count=compatibility_data['mutual_questions_count']
                 )
+
+            # If the reverse record exists (other_user stored as user1), keep it in sync
+            Compatibility.objects.filter(user1=other_user, user2=user).update(
+                overall_compatibility=compatibility_data['overall_compatibility'],
+                compatible_with_me=compatibility_data['im_compatible_with'],
+                im_compatible_with=compatibility_data['compatible_with_me'],
+                mutual_questions_count=compatibility_data['mutual_questions_count']
+            )
 
         return created_count

@@ -1137,7 +1137,7 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
             if should_enqueue and force_enqueue:
                 try:
                     print(f"⚡ Inline compatibility recompute starting for user {user.id}", flush=True)
-                    CompatibilityService.recalculate_all_compatibilities(user)
+                    CompatibilityService.recalculate_all_compatibilities(user, use_full_reset=False)
                     job = getattr(user, 'compatibility_job', None)
                     if job:
                         job.attempts = (job.attempts or 0) + 1
