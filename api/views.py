@@ -1636,27 +1636,22 @@ class StatsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'])
     def dashboard(self, request):
         """Get dashboard statistics"""
-        from datetime import datetime, timedelta
+        from datetime import timedelta
 
-        # Calculate time ranges
         now = timezone.now()
         day_ago = now - timedelta(days=1)
         week_ago = now - timedelta(days=7)
         month_ago = now - timedelta(days=30)
-        year_ago = now - timedelta(days=365)
+        year_start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
 
-        # Total users
-        total_users = User.objects.count()
+        active_users = User.objects.filter(is_banned=False)
 
-        # Active users (based on last_seen)
-        daily_active = User.objects.filter(last_seen__gte=day_ago).count()
-        weekly_active = User.objects.filter(last_seen__gte=week_ago).count()
-        monthly_active = User.objects.filter(last_seen__gte=month_ago).count()
+        total_users = active_users.count()
+        daily_active = active_users.filter(last_login__gte=day_ago).count()
+        weekly_active = active_users.filter(last_login__gte=week_ago).count()
+        monthly_active = active_users.filter(last_login__gte=month_ago).count()
+        new_users_this_year = active_users.filter(date_joined__gte=year_start).count()
 
-        # New users this year
-        new_users_this_year = User.objects.filter(date_joined__gte=year_ago).count()
-
-        # Total interactions
         total_matches = UserResult.objects.filter(tag='matched').count()
         total_likes = UserResult.objects.filter(tag='like').count()
         total_approves = UserResult.objects.filter(tag='approve').count()
