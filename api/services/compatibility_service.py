@@ -309,40 +309,101 @@ class CompatibilityService:
             ).delete()
 
         # Get all other users
-        other_users = User.objects.exclude(id=user.id).exclude(is_banned=True)
+        other_users = list(User.objects.exclude(id=user.id).exclude(is_banned=True))
+        if not other_users:
+            return 0
+
+        user_answers = list(
+            user.answers.only(
+                'question_id',
+                'me_answer',
+                'me_open_to_all',
+                'me_importance',
+                'looking_for_answer',
+                'looking_for_open_to_all',
+                'looking_for_importance',
+            )
+        )
+
+        other_answers = UserAnswer.objects.filter(user__in=other_users).only(
+            'user_id',
+            'question_id',
+            'me_answer',
+            'me_open_to_all',
+            'me_importance',
+            'looking_for_answer',
+            'looking_for_open_to_all',
+            'looking_for_importance',
+        )
+
+        answers_by_user: dict[str, list[UserAnswer]] = {}
+        for answer in other_answers:
+            answers_by_user.setdefault(str(answer.user_id), []).append(answer)
+
+        existing_comps = Compatibility.objects.filter(
+            Q(user1=user) | Q(user2=user)
+        )
+        existing_map: dict[tuple[str, str], Compatibility] = {}
+        for comp in existing_comps:
+            existing_map[(str(comp.user1_id), str(comp.user2_id))] = comp
 
         created_count = 0
+        updates: list[Compatibility] = []
+        reverse_updates: list[Compatibility] = []
+        to_create: list[Compatibility] = []
+
         for other_user in other_users:
-            compatibility_data = CompatibilityService.calculate_compatibility_between_users(user, other_user)
-
-            try:
-                _, created = Compatibility.objects.update_or_create(
-                    user1=user,
-                    user2=other_user,
-                    defaults={
-                        'overall_compatibility': compatibility_data['overall_compatibility'],
-                        'compatible_with_me': compatibility_data['compatible_with_me'],
-                        'im_compatible_with': compatibility_data['im_compatible_with'],
-                        'mutual_questions_count': compatibility_data['mutual_questions_count']
-                    }
-                )
-                if created:
-                    created_count += 1
-            except IntegrityError:
-                # Handle race condition where a concurrent job just created the pair
-                Compatibility.objects.filter(user1=user, user2=other_user).update(
-                    overall_compatibility=compatibility_data['overall_compatibility'],
-                    compatible_with_me=compatibility_data['compatible_with_me'],
-                    im_compatible_with=compatibility_data['im_compatible_with'],
-                    mutual_questions_count=compatibility_data['mutual_questions_count']
-                )
-
-            # If the reverse record exists (other_user stored as user1), keep it in sync
-            Compatibility.objects.filter(user1=other_user, user2=user).update(
-                overall_compatibility=compatibility_data['overall_compatibility'],
-                compatible_with_me=compatibility_data['im_compatible_with'],
-                im_compatible_with=compatibility_data['compatible_with_me'],
-                mutual_questions_count=compatibility_data['mutual_questions_count']
+            other_answers_list = answers_by_user.get(str(other_user.id), [])
+            compatibility_data = CompatibilityService.calculate_compatibility_between_users(
+                user,
+                other_user,
+                user1_answers=user_answers,
+                user2_answers=other_answers_list,
             )
+
+            key_direct = (str(user.id), str(other_user.id))
+            key_reverse = (str(other_user.id), str(user.id))
+
+            if key_direct in existing_map:
+                comp = existing_map[key_direct]
+                comp.overall_compatibility = compatibility_data['overall_compatibility']
+                comp.compatible_with_me = compatibility_data['compatible_with_me']
+                comp.im_compatible_with = compatibility_data['im_compatible_with']
+                comp.mutual_questions_count = compatibility_data['mutual_questions_count']
+                updates.append(comp)
+            elif key_reverse in existing_map:
+                comp = existing_map[key_reverse]
+                # Swap directional fields because orientation is reversed
+                comp.overall_compatibility = compatibility_data['overall_compatibility']
+                comp.compatible_with_me = compatibility_data['im_compatible_with']
+                comp.im_compatible_with = compatibility_data['compatible_with_me']
+                comp.mutual_questions_count = compatibility_data['mutual_questions_count']
+                reverse_updates.append(comp)
+            else:
+                to_create.append(
+                    Compatibility(
+                        user1=user,
+                        user2=other_user,
+                        overall_compatibility=compatibility_data['overall_compatibility'],
+                        compatible_with_me=compatibility_data['compatible_with_me'],
+                        im_compatible_with=compatibility_data['im_compatible_with'],
+                        mutual_questions_count=compatibility_data['mutual_questions_count'],
+                    )
+                )
+                created_count += 1
+
+        update_fields = [
+            'overall_compatibility',
+            'compatible_with_me',
+            'im_compatible_with',
+            'mutual_questions_count',
+        ]
+
+        if updates:
+            Compatibility.objects.bulk_update(updates, update_fields)
+        if reverse_updates:
+            Compatibility.objects.bulk_update(reverse_updates, update_fields)
+        if to_create:
+            Compatibility.objects.bulk_create(to_create, ignore_conflicts=True)
 
         return created_count
