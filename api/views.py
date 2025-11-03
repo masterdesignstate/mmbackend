@@ -1136,7 +1136,7 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
 
             if should_enqueue and force_enqueue:
                 try:
-                    print(f"⚡ Inline compatibility recompute starting for user {user.id}")
+                    print(f"⚡ Inline compatibility recompute starting for user {user.id}", flush=True)
                     CompatibilityService.recalculate_all_compatibilities(user)
                     job = getattr(user, 'compatibility_job', None)
                     if job:
@@ -1145,9 +1145,9 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
                         job.error_message = ''
                         job.last_attempt_at = timezone.now()
                         job.save(update_fields=['attempts', 'status', 'error_message', 'last_attempt_at', 'updated_at'])
-                    print(f"✅ Inline compatibility recompute finished for user {user.id}")
+                    print(f"✅ Inline compatibility recompute finished for user {user.id}", flush=True)
                 except Exception as exc:
-                    print(f"❌ Inline compatibility recompute failed for user {user.id}: {exc}")
+                    print(f"❌ Inline compatibility recompute failed for user {user.id}: {exc}", flush=True)
                     logger.exception(
                         "Immediate compatibility recompute failed for user %s: %s",
                         user.id,

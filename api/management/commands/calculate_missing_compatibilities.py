@@ -121,4 +121,3 @@ class Command(BaseCommand):
 
         if failed_jobs > 0:
             self.stdout.write(self.style.WARNING('⚠️  Some jobs failed. Check logs for details.'))
-*** End Patch
