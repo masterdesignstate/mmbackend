@@ -16,7 +16,11 @@ from .models import (
     CompatibilityJob,
 )
 from .services.compatibility_service import CompatibilityService
-from .services.compatibility_queue import enqueue_user_for_recalculation, should_enqueue_after_answer
+from .services.compatibility_queue import (
+    enqueue_user_for_recalculation,
+    should_enqueue_after_answer,
+    MIN_MATCHABLE_ANSWERS,
+)
 from .serializers import (
     UserSerializer, TagSerializer, QuestionSerializer, UserAnswerSerializer,
     CompatibilitySerializer, UserResultSerializer, MessageSerializer,
@@ -1112,11 +1116,20 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
                     )
                     user.questions_answered_count = actual_count
 
+            match_ready = (user.questions_answered_count or 0) >= MIN_MATCHABLE_ANSWERS
+            has_existing_compat = Compatibility.objects.filter(
+                Q(user1=user) | Q(user2=user)
+            ).exists()
+
             should_enqueue, force_enqueue = should_enqueue_after_answer(
                 question_id=str(question.id),
                 user=user,
                 created=created,
             )
+
+            if match_ready and not has_existing_compat:
+                should_enqueue = True
+                force_enqueue = True
 
             if should_enqueue:
                 enqueue_user_for_recalculation(user, force=force_enqueue)

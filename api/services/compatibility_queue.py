@@ -76,8 +76,8 @@ def should_enqueue_after_answer(
     is_onboarding_trigger = question_id in ONBOARDING_TRIGGER_QUESTION_IDS
 
     if not created:
-        # Updates to existing answers should always requeue once the user is match-ready
-        return (match_ready, False)
+        # Updates to existing answers should immediately trigger a recalculation once the user is match-ready
+        return (match_ready, match_ready)
 
     if not match_ready:
         return (False, False)
