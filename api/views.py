@@ -1764,19 +1764,31 @@ class StatsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'])
     def timeseries(self, request):
         """Get time-series data for charts"""
-        from datetime import timedelta
+        from datetime import timedelta, datetime
         from api.models import DailyMetric
 
-        # Get period parameter (default: 30 days)
-        period = request.query_params.get('period', '30')
-        try:
-            days = int(period)
-        except ValueError:
-            days = 30
+        # Check if start_date and end_date are provided
+        start_date_param = request.query_params.get('start_date')
+        end_date_param = request.query_params.get('end_date')
 
-        # Get metrics for the specified period
-        end_date = timezone.now().date()
-        start_date = end_date - timedelta(days=days)
+        if start_date_param and end_date_param:
+            # Use specific date range
+            try:
+                start_date = datetime.fromisoformat(start_date_param).date()
+                end_date = datetime.fromisoformat(end_date_param).date()
+                days = (end_date - start_date).days + 1
+            except ValueError:
+                return Response({'error': 'Invalid date format'}, status=400)
+        else:
+            # Use period parameter (default: 30 days from today)
+            period = request.query_params.get('period', '30')
+            try:
+                days = int(period)
+            except ValueError:
+                days = 30
+
+            end_date = timezone.now().date()
+            start_date = end_date - timedelta(days=days - 1)
 
         metrics = DailyMetric.objects.filter(
             date__gte=start_date,
