@@ -517,6 +517,58 @@ class UserViewSet(viewsets.ModelViewSet):
                 'error': 'Failed to get compatible users'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    @action(detail=False, methods=['post'])
+    def change_email(self, request):
+        """Change user's email address (requires current password)"""
+        from .serializers import ChangeEmailSerializer
+
+        if not request.user.is_authenticated:
+            return Response({'error': 'Authentication required'}, status=401)
+
+        serializer = ChangeEmailSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            user = request.user
+            new_email = serializer.validated_data['new_email']
+
+            # Update email and username (since we use email as username)
+            user.email = new_email
+            user.username = new_email
+            user.save()
+
+            logger.info(f"User {user.id} changed email to {new_email}")
+            return Response({
+                'success': True,
+                'message': 'Email updated successfully',
+                'email': new_email
+            })
+
+        return Response(serializer.errors, status=400)
+
+    @action(detail=False, methods=['post'])
+    def change_password(self, request):
+        """Change user's password (requires current password)"""
+        from .serializers import ChangePasswordSerializer
+
+        if not request.user.is_authenticated:
+            return Response({'error': 'Authentication required'}, status=401)
+
+        serializer = ChangePasswordSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            user = request.user
+            new_password = serializer.validated_data['new_password']
+
+            # Set new password
+            user.set_password(new_password)
+            user.save()
+
+            logger.info(f"User {user.id} changed password")
+            return Response({
+                'success': True,
+                'message': 'Password updated successfully'
+            })
+
+        return Response(serializer.errors, status=400)
+
 
 class TagViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = TagSerializer

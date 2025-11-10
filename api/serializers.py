@@ -248,4 +248,49 @@ class ControlsSerializer(serializers.ModelSerializer):
     class Meta:
         model = Controls
         fields = ['id', 'adjust', 'exponent', 'ota', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'created_at', 'updated_at'] 
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class ChangeEmailSerializer(serializers.Serializer):
+    """Serializer for changing user email"""
+    current_password = serializers.CharField(write_only=True, required=True)
+    new_email = serializers.EmailField(required=True)
+
+    def validate_new_email(self, value):
+        """Check if email is already in use"""
+        user = self.context.get('request').user
+        if User.objects.filter(email=value).exclude(id=user.id).exists():
+            raise serializers.ValidationError("This email is already in use by another account.")
+        return value
+
+    def validate(self, data):
+        """Verify current password"""
+        user = self.context.get('request').user
+        if not user.check_password(data['current_password']):
+            raise serializers.ValidationError({"current_password": "Current password is incorrect."})
+        return data
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    """Serializer for changing user password"""
+    current_password = serializers.CharField(write_only=True, required=True)
+    new_password = serializers.CharField(write_only=True, required=True, min_length=8)
+    confirm_password = serializers.CharField(write_only=True, required=True)
+
+    def validate(self, data):
+        """Verify current password and confirm new password match"""
+        user = self.context.get('request').user
+
+        # Check current password
+        if not user.check_password(data['current_password']):
+            raise serializers.ValidationError({"current_password": "Current password is incorrect."})
+
+        # Check new password matches confirmation
+        if data['new_password'] != data['confirm_password']:
+            raise serializers.ValidationError({"confirm_password": "New passwords do not match."})
+
+        # Check new password is different from current
+        if data['current_password'] == data['new_password']:
+            raise serializers.ValidationError({"new_password": "New password must be different from current password."})
+
+        return data 
