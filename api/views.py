@@ -519,55 +519,86 @@ class UserViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def change_email(self, request):
-        """Change user's email address (requires current password)"""
-        from .serializers import ChangeEmailSerializer
+        """Change user's email address (requires current password and current email)"""
+        current_email = request.data.get('current_email')
+        current_password = request.data.get('current_password')
+        new_email = request.data.get('new_email')
 
-        if not request.user.is_authenticated:
-            return Response({'error': 'Authentication required'}, status=401)
-
-        serializer = ChangeEmailSerializer(data=request.data, context={'request': request})
-        if serializer.is_valid():
-            user = request.user
-            new_email = serializer.validated_data['new_email']
-
-            # Update email and username (since we use email as username)
-            user.email = new_email
-            user.username = new_email
-            user.save()
-
-            logger.info(f"User {user.id} changed email to {new_email}")
+        if not current_email or not current_password or not new_email:
             return Response({
-                'success': True,
-                'message': 'Email updated successfully',
-                'email': new_email
-            })
+                'error': 'Current email, current password, and new email are required'
+            }, status=400)
 
-        return Response(serializer.errors, status=400)
+        # Find user by current email
+        try:
+            user = User.objects.get(email=current_email)
+        except User.DoesNotExist:
+            return Response({'error': 'Invalid credentials'}, status=400)
+
+        # Verify password
+        if not user.check_password(current_password):
+            return Response({'current_password': ['Current password is incorrect.']}, status=400)
+
+        # Check if new email is already in use by another user
+        if User.objects.filter(email=new_email).exclude(id=user.id).exists():
+            return Response({'new_email': ['This email is already in use by another account.']}, status=400)
+
+        # Update email and username (since we use email as username)
+        user.email = new_email
+        user.username = new_email
+        user.save()
+
+        logger.info(f"User {user.id} changed email from {current_email} to {new_email}")
+        return Response({
+            'success': True,
+            'message': 'Email updated successfully',
+            'email': new_email
+        })
 
     @action(detail=False, methods=['post'])
     def change_password(self, request):
-        """Change user's password (requires current password)"""
-        from .serializers import ChangePasswordSerializer
+        """Change user's password (requires current email and password)"""
+        current_email = request.data.get('current_email')
+        current_password = request.data.get('current_password')
+        new_password = request.data.get('new_password')
+        confirm_password = request.data.get('confirm_password')
 
-        if not request.user.is_authenticated:
-            return Response({'error': 'Authentication required'}, status=401)
-
-        serializer = ChangePasswordSerializer(data=request.data, context={'request': request})
-        if serializer.is_valid():
-            user = request.user
-            new_password = serializer.validated_data['new_password']
-
-            # Set new password
-            user.set_password(new_password)
-            user.save()
-
-            logger.info(f"User {user.id} changed password")
+        if not current_email or not current_password or not new_password or not confirm_password:
             return Response({
-                'success': True,
-                'message': 'Password updated successfully'
-            })
+                'error': 'Current email, current password, new password, and confirm password are required'
+            }, status=400)
 
-        return Response(serializer.errors, status=400)
+        # Find user by email
+        try:
+            user = User.objects.get(email=current_email)
+        except User.DoesNotExist:
+            return Response({'error': 'Invalid credentials'}, status=400)
+
+        # Verify current password
+        if not user.check_password(current_password):
+            return Response({'current_password': ['Current password is incorrect.']}, status=400)
+
+        # Check new password matches confirmation
+        if new_password != confirm_password:
+            return Response({'confirm_password': ['New passwords do not match.']}, status=400)
+
+        # Check password length
+        if len(new_password) < 8:
+            return Response({'new_password': ['Password must be at least 8 characters long.']}, status=400)
+
+        # Check new password is different from current
+        if current_password == new_password:
+            return Response({'new_password': ['New password must be different from current password.']}, status=400)
+
+        # Set new password
+        user.set_password(new_password)
+        user.save()
+
+        logger.info(f"User {user.id} changed password")
+        return Response({
+            'success': True,
+            'message': 'Password updated successfully'
+        })
 
 
 class TagViewSet(viewsets.ReadOnlyModelViewSet):
