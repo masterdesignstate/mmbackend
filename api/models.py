@@ -447,3 +447,31 @@ class RestrictedWord(models.Model):
 
     def __str__(self):
         return f"{self.word} ({self.severity})"
+
+
+class Notification(models.Model):
+    """Notifications for user actions (approve, like, match)"""
+    NOTIFICATION_TYPE_CHOICES = [
+        ('approve', 'Approve'),
+        ('like', 'Like'),
+        ('match', 'Match'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications_received')
+    sender = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications_sent')
+    notification_type = models.CharField(max_length=20, choices=NOTIFICATION_TYPE_CHOICES)
+    is_read = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    related_user_result = models.ForeignKey(UserResult, on_delete=models.CASCADE, null=True, blank=True, related_name='notifications')
+
+    class Meta:
+        db_table = 'notifications'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['recipient', 'is_read'], name='notif_recip_read_idx'),
+            models.Index(fields=['recipient', '-created_at'], name='notif_recip_date_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.sender.username} {self.notification_type} {self.recipient.username}"

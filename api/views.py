@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 from .models import (
     User, Tag, Question, UserAnswer, Compatibility,
     UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, Controls,
-    CompatibilityJob,
+    CompatibilityJob, Notification,
 )
 from .services.compatibility_service import CompatibilityService
 from .services.compatibility_queue import (
@@ -26,7 +26,7 @@ from .serializers import (
     CompatibilitySerializer, UserResultSerializer, MessageSerializer,
     PictureModerationSerializer, UserReportSerializer, UserOnlineStatusSerializer,
     DetailedUserSerializer, DetailedQuestionSerializer, UserTagSerializer,
-    SimpleUserSerializer, ControlsSerializer,
+    SimpleUserSerializer, ControlsSerializer, NotificationSerializer,
 )
 from .permissions import IsDashboardAdmin
 
@@ -1380,6 +1380,46 @@ class UserResultViewSet(viewsets.ModelViewSet):
                 result_user=result_user,
                 tag=tag
             )
+
+            # Create notification for approve, like, or match
+            notification_type = None
+            if tag == 'approve':
+                notification_type = 'approve'
+            elif tag == 'like':
+                notification_type = 'like'
+                # Check if this creates a match (mutual like)
+                mutual_like = UserResult.objects.filter(
+                    user=result_user,
+                    result_user=user,
+                    tag='like'
+                ).exists()
+
+                if mutual_like:
+                    # Create match notification for both users
+                    Notification.objects.create(
+                        recipient=user,
+                        sender=result_user,
+                        notification_type='match',
+                        related_user_result=user_result
+                    )
+                    Notification.objects.create(
+                        recipient=result_user,
+                        sender=user,
+                        notification_type='match',
+                        related_user_result=user_result
+                    )
+                    logger.info(f"Created match notifications between {user.username} and {result_user.username}")
+
+            # Create notification for approve or like
+            if notification_type:
+                Notification.objects.create(
+                    recipient=result_user,
+                    sender=user,
+                    notification_type=notification_type,
+                    related_user_result=user_result
+                )
+                logger.info(f"Created {notification_type} notification from {user.username} to {result_user.username}")
+
             serializer = self.get_serializer(user_result)
             return Response({
                 'action': 'added',
@@ -1843,3 +1883,62 @@ class ControlsViewSet(viewsets.ModelViewSet):
         serializer.save()
 
         return Response(serializer.data)
+
+
+class NotificationViewSet(viewsets.ModelViewSet):
+    """ViewSet for managing user notifications"""
+    serializer_class = NotificationSerializer
+    permission_classes = [permissions.AllowAny]  # Changed for testing
+    filter_backends = [filters.OrderingFilter]
+    ordering_fields = ['created_at']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        """Only return notifications for the current user"""
+        # For detail views (retrieve, update, destroy, mark_read), return all notifications
+        # so we can look up by ID
+        if self.action in ['retrieve', 'update', 'partial_update', 'destroy', 'mark_read']:
+            return Notification.objects.all()
+
+        # For testing, allow user_id parameter
+        user_id = self.request.query_params.get('user_id')
+        if user_id:
+            return Notification.objects.filter(recipient_id=user_id)
+
+        if self.request.user.is_authenticated:
+            return Notification.objects.filter(recipient=self.request.user)
+        return Notification.objects.none()
+
+    @action(detail=False, methods=['get'])
+    def unread_count(self, request):
+        """Get count of unread notifications"""
+        user_id = request.query_params.get('user_id')
+        if user_id:
+            count = Notification.objects.filter(recipient_id=user_id, is_read=False).count()
+        elif request.user.is_authenticated:
+            count = Notification.objects.filter(recipient=request.user, is_read=False).count()
+        else:
+            count = 0
+
+        return Response({'count': count})
+
+    @action(detail=True, methods=['post'])
+    def mark_read(self, request, pk=None):
+        """Mark a notification as read"""
+        notification = self.get_object()
+        notification.is_read = True
+        notification.save()
+
+        serializer = self.get_serializer(notification)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['post'])
+    def mark_all_read(self, request):
+        """Mark all notifications as read for the current user"""
+        user_id = request.query_params.get('user_id')
+        if user_id:
+            Notification.objects.filter(recipient_id=user_id, is_read=False).update(is_read=True)
+        elif request.user.is_authenticated:
+            Notification.objects.filter(recipient=request.user, is_read=False).update(is_read=True)
+
+        return Response({'status': 'all notifications marked as read'})

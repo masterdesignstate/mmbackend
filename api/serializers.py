@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from .models import (
     User, Tag, Question, UserAnswer, Compatibility,
-    UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, QuestionAnswer, Controls
+    UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, QuestionAnswer, Controls, Notification
 )
 
 
@@ -293,4 +293,14 @@ class ChangePasswordSerializer(serializers.Serializer):
         if data['current_password'] == data['new_password']:
             raise serializers.ValidationError({"new_password": "New password must be different from current password."})
 
-        return data 
+        return data
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    sender = SimpleUserSerializer(read_only=True)
+    recipient = SimpleUserSerializer(read_only=True)
+
+    class Meta:
+        model = Notification
+        fields = ['id', 'recipient', 'sender', 'notification_type', 'is_read', 'created_at', 'related_user_result']
+        read_only_fields = ['id', 'created_at'] 
