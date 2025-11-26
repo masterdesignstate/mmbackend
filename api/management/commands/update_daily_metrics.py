@@ -49,7 +49,7 @@ class Command(BaseCommand):
         total_users = User.objects.filter(date_joined__date__lte=target_date).count()
         new_users = User.objects.filter(date_joined__date=target_date).count()
         active_users = User.objects.filter(
-            last_seen__date=target_date
+            last_active__date=target_date
         ).count()
 
         # Activity metrics (created on this day)

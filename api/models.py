@@ -16,8 +16,7 @@ class User(AbstractUser):
     live = models.CharField(max_length=100, null=True, blank=True, help_text="Where the user currently lives")
     tagline = models.CharField(max_length=40, blank=True, help_text="Short tagline")
     bio = models.TextField(max_length=500, blank=True)
-    is_online = models.BooleanField(default=False)
-    last_seen = models.DateTimeField(default=timezone.now)
+    last_active = models.DateTimeField(default=timezone.now)
     is_banned = models.BooleanField(default=False)
     is_admin = models.BooleanField(
         default=False,
@@ -26,7 +25,14 @@ class User(AbstractUser):
     ban_reason = models.TextField(blank=True)
     ban_date = models.DateTimeField(null=True, blank=True)
     questions_answered_count = models.PositiveIntegerField(default=0)
-    
+
+    @property
+    def is_online(self):
+        """User is considered online if active within last 5 minutes"""
+        if not self.last_active:
+            return False
+        return (timezone.now() - self.last_active).total_seconds() < 300  # 5 minutes
+
     class Meta:
         db_table = 'users'
 
@@ -208,18 +214,56 @@ class UserResult(models.Model):
         return f"{self.user.username} tagged {self.result_user.username} as {self.tag}"
 
 
+class Conversation(models.Model):
+    """Conversation between two users"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    participant1 = models.ForeignKey(User, on_delete=models.CASCADE, related_name='conversations_as_participant1')
+    participant2 = models.ForeignKey(User, on_delete=models.CASCADE, related_name='conversations_as_participant2')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'conversations'
+        ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['participant1', 'participant2'], name='conv_participants_idx'),
+            models.Index(fields=['-updated_at'], name='conv_updated_idx'),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['participant1', 'participant2'],
+                name='unique_conversation_pair'
+            )
+        ]
+
+    def __str__(self):
+        return f"Conversation between {self.participant1.username} and {self.participant2.username}"
+
+    def get_other_participant(self, user):
+        """Get the other participant in the conversation"""
+        if user == self.participant1:
+            return self.participant2
+        return self.participant1
+
+
 class Message(models.Model):
     """Messages between users"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    conversation = models.ForeignKey(Conversation, on_delete=models.CASCADE, related_name='messages', null=True, blank=True)
     sender = models.ForeignKey(User, on_delete=models.CASCADE, related_name='sent_messages')
     receiver = models.ForeignKey(User, on_delete=models.CASCADE, related_name='received_messages')
     content = models.TextField()
     is_read = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
-    
+
     class Meta:
+        db_table = 'messages'
         ordering = ['created_at']
-    
+        indexes = [
+            models.Index(fields=['conversation', 'created_at'], name='msg_conv_created_idx'),
+            models.Index(fields=['receiver', 'is_read'], name='msg_receiver_read_idx'),
+        ]
+
     def __str__(self):
         return f"{self.sender.username} -> {self.receiver.username}"
 
@@ -455,12 +499,14 @@ class Notification(models.Model):
         ('approve', 'Approve'),
         ('like', 'Like'),
         ('match', 'Match'),
+        ('note', 'Note'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications_received')
     sender = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications_sent')
     notification_type = models.CharField(max_length=20, choices=NOTIFICATION_TYPE_CHOICES)
+    note = models.TextField(blank=True, null=True)
     is_read = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     related_user_result = models.ForeignKey(UserResult, on_delete=models.CASCADE, null=True, blank=True, related_name='notifications')

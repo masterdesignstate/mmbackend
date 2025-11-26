@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from .models import (
     User, Tag, Question, UserAnswer, Compatibility,
-    UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, QuestionAnswer, Controls, Notification
+    UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, QuestionAnswer, Controls, Notification, Conversation
 )
 
 
@@ -16,17 +16,18 @@ class UserSerializer(serializers.ModelSerializer):
     question_answers = serializers.SerializerMethodField()
     date_joined = serializers.DateTimeField(read_only=True)
     is_banned = serializers.BooleanField(read_only=True)
+    is_online = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = User
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name',
             'profile_photo', 'age', 'date_of_birth', 'height', 'from_location', 'live', 'tagline', 'bio',
-            'is_online', 'last_seen', 'questions_answered_count', 'online_status', 'question_answers',
+            'is_online', 'last_active', 'questions_answered_count', 'online_status', 'question_answers',
             'date_joined', 'is_banned', 'is_admin'
         ]
         read_only_fields = [
-            'id', 'is_online', 'last_seen', 'questions_answered_count',
+            'id', 'is_online', 'last_active', 'questions_answered_count',
             'date_joined', 'is_banned', 'is_admin'
         ]
 
@@ -154,10 +155,10 @@ class UserResultSerializer(serializers.ModelSerializer):
 class MessageSerializer(serializers.ModelSerializer):
     sender = UserSerializer(read_only=True)
     receiver = UserSerializer(read_only=True)
-    
+
     class Meta:
         model = Message
-        fields = ['id', 'sender', 'receiver', 'content', 'is_read', 'created_at']
+        fields = ['id', 'conversation', 'sender', 'receiver', 'content', 'is_read', 'created_at']
         read_only_fields = ['id', 'sender', 'is_read', 'created_at']
 
 
@@ -227,12 +228,14 @@ class DetailedQuestionSerializer(QuestionSerializer):
 # Lightweight serializers for compatibility endpoint (no circular references)
 class SimpleUserSerializer(serializers.ModelSerializer):
     """Lightweight user serializer for compatibility lists - no nested data"""
+    is_online = serializers.BooleanField(read_only=True)
+
     class Meta:
         model = User
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name',
             'profile_photo', 'age', 'date_of_birth', 'height',
-            'from_location', 'live', 'tagline', 'bio', 'is_online', 'last_seen'
+            'from_location', 'live', 'tagline', 'bio', 'is_online', 'last_active'
         ]
 
 class CompactCompatibilityResultSerializer(serializers.Serializer):
@@ -302,5 +305,57 @@ class NotificationSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Notification
-        fields = ['id', 'recipient', 'sender', 'notification_type', 'is_read', 'created_at', 'related_user_result']
-        read_only_fields = ['id', 'created_at'] 
+        fields = ['id', 'recipient', 'sender', 'notification_type', 'note', 'is_read', 'created_at', 'related_user_result']
+        read_only_fields = ['id', 'created_at']
+
+
+class ConversationSerializer(serializers.ModelSerializer):
+    participant1 = SimpleUserSerializer(read_only=True)
+    participant2 = SimpleUserSerializer(read_only=True)
+    last_message = serializers.SerializerMethodField()
+    unread_count = serializers.SerializerMethodField()
+    other_participant = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Conversation
+        fields = ['id', 'participant1', 'participant2', 'other_participant', 'last_message', 'unread_count', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_last_message(self, obj):
+        last_msg = obj.messages.order_by('-created_at').first()
+        if last_msg:
+            return {
+                'id': str(last_msg.id),
+                'content': last_msg.content[:100],  # Preview
+                'sender_id': str(last_msg.sender.id),
+                'created_at': last_msg.created_at,
+                'is_read': last_msg.is_read
+            }
+        return None
+
+    def get_unread_count(self, obj):
+        request = self.context.get('request')
+        if request and hasattr(request, 'user') and request.user.is_authenticated:
+            return obj.messages.filter(receiver=request.user, is_read=False).count()
+        # Fallback: check for user_id in context
+        user_id = self.context.get('user_id')
+        if user_id:
+            return obj.messages.filter(receiver_id=user_id, is_read=False).count()
+        return 0
+
+    def get_other_participant(self, obj):
+        request = self.context.get('request')
+        user_id = self.context.get('user_id')
+
+        current_user_id = None
+        if request and hasattr(request, 'user') and request.user.is_authenticated:
+            current_user_id = request.user.id
+        elif user_id:
+            current_user_id = user_id
+
+        if current_user_id:
+            if str(obj.participant1.id) == str(current_user_id):
+                return SimpleUserSerializer(obj.participant2).data
+            else:
+                return SimpleUserSerializer(obj.participant1).data
+        return None

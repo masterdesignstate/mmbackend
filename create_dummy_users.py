@@ -345,8 +345,7 @@ def create_dummy_users(count=100):
             bio=bio,
             tagline=tagline,
             profile_photo=profile_photo,
-            is_online=random.choice([True, False]),
-            last_seen=datetime.now() - timedelta(hours=random.randint(0, 72))
+            last_active=datetime.now() - timedelta(hours=random.randint(0, 72))
         )
 
         # Create answers for all mandatory questions

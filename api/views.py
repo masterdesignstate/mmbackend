@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 from .models import (
     User, Tag, Question, UserAnswer, Compatibility,
     UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, Controls,
-    CompatibilityJob, Notification,
+    CompatibilityJob, Notification, Conversation,
 )
 from .services.compatibility_service import CompatibilityService
 from .services.compatibility_queue import (
@@ -26,7 +26,7 @@ from .serializers import (
     CompatibilitySerializer, UserResultSerializer, MessageSerializer,
     PictureModerationSerializer, UserReportSerializer, UserOnlineStatusSerializer,
     DetailedUserSerializer, DetailedQuestionSerializer, UserTagSerializer,
-    SimpleUserSerializer, ControlsSerializer, NotificationSerializer,
+    SimpleUserSerializer, ControlsSerializer, NotificationSerializer, ConversationSerializer,
 )
 from .permissions import IsDashboardAdmin
 
@@ -36,8 +36,8 @@ class UserViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.AllowAny]  # Changed for testing
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['username', 'first_name', 'last_name', 'from_location', 'live', 'bio']
-    ordering_fields = ['age', 'height', 'questions_answered_count', 'last_seen']
-    ordering = ['-last_seen']
+    ordering_fields = ['age', 'height', 'questions_answered_count', 'last_active']
+    ordering = ['-last_active']
 
     def get_queryset(self):
         # Exclude banned users and current user
@@ -84,19 +84,17 @@ class UserViewSet(viewsets.ModelViewSet):
     def update_online_status(self, request, pk=None):
         """Update user's online status"""
         user = self.get_object()
-        is_online = request.data.get('is_online', False)
-        
+
+        # Update last_active timestamp (is_online is now a computed property)
+        user.last_active = timezone.now()
+        user.save(update_fields=['last_active'])
+
+        # Also update the old UserOnlineStatus model if it exists (for backwards compatibility)
         online_status, created = UserOnlineStatus.objects.get_or_create(user=user)
-        online_status.is_online = is_online
+        online_status.is_online = request.data.get('is_online', False)
         online_status.last_activity = timezone.now()
-        if is_online:
-            online_status.last_seen = timezone.now()
         online_status.save()
-        
-        user.is_online = is_online
-        user.last_seen = timezone.now()
-        user.save()
-        
+
         return Response({'status': 'updated'})
 
     @action(detail=False, methods=['get'])
@@ -1434,7 +1432,7 @@ class UserResultViewSet(viewsets.ModelViewSet):
         """Get all tags for a specific user pair"""
         user_id = request.query_params.get('user_id')
         result_user_id = request.query_params.get('result_user_id')
-        
+
 
         if not user_id or not result_user_id:
             return Response(
@@ -1446,10 +1444,68 @@ class UserResultViewSet(viewsets.ModelViewSet):
             user_id=user_id,
             result_user_id=result_user_id
         ).values_list('tag', flat=True)
-        
+
         tags_list = list(tags)
 
         return Response({'tags': tags_list})
+
+    @action(detail=False, methods=['post'])
+    def send_note(self, request):
+        """Send a note to another user (appears in notifications and as first message in chat)"""
+        sender_id = request.data.get('sender_id')
+        recipient_id = request.data.get('recipient_id')
+        note = request.data.get('note')
+
+        if not all([sender_id, recipient_id, note]):
+            return Response(
+                {'error': 'sender_id, recipient_id, and note are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            sender = User.objects.get(id=sender_id)
+            recipient = User.objects.get(id=recipient_id)
+        except User.DoesNotExist:
+            return Response(
+                {'error': 'User not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Create notification with note
+        notification = Notification.objects.create(
+            recipient=recipient,
+            sender=sender,
+            notification_type='note',
+            note=note
+        )
+        logger.info(f"Created note notification from {sender.username} to {recipient.username}")
+
+        # Get or create conversation
+        conversation = Conversation.objects.filter(
+            Q(participant1=sender, participant2=recipient) | Q(participant1=recipient, participant2=sender)
+        ).first()
+
+        if not conversation:
+            conversation = Conversation.objects.create(
+                participant1=sender,
+                participant2=recipient
+            )
+
+        # Create message in conversation
+        message = Message.objects.create(
+            conversation=conversation,
+            sender=sender,
+            receiver=recipient,
+            content=note
+        )
+        logger.info(f"Created note message from {sender.username} to {recipient.username} in conversation {conversation.id}")
+
+        return Response({
+            'success': True,
+            'notification_id': str(notification.id),
+            'message_id': str(message.id),
+            'conversation_id': str(conversation.id)
+        }, status=status.HTTP_201_CREATED)
 
 
 class UserTagViewSet(viewsets.ModelViewSet):
@@ -1657,7 +1713,15 @@ class UserReportViewSet(viewsets.ModelViewSet):
         return UserReport.objects.filter(reporter=self.request.user)
 
     def perform_create(self, serializer):
-        serializer.save()
+        # Get reporter and reported_user IDs from request data
+        reporter_id = self.request.data.get('reporter')
+        reported_user_id = self.request.data.get('reported_user')
+
+        # Get the User objects
+        reporter = User.objects.get(id=reporter_id)
+        reported_user = User.objects.get(id=reported_user_id)
+
+        serializer.save(reporter=reporter, reported_user=reported_user)
 
     @action(detail=False, methods=['get'])
     def pending(self, request):
@@ -1942,3 +2006,175 @@ class NotificationViewSet(viewsets.ModelViewSet):
             Notification.objects.filter(recipient=request.user, is_read=False).update(is_read=True)
 
         return Response({'status': 'all notifications marked as read'})
+
+
+class ConversationViewSet(viewsets.ModelViewSet):
+    """ViewSet for managing conversations between users"""
+    serializer_class = ConversationSerializer
+    permission_classes = [permissions.AllowAny]  # Changed for testing
+    filter_backends = [filters.OrderingFilter]
+    ordering_fields = ['updated_at', 'created_at']
+    ordering = ['-updated_at']
+
+    def get_queryset(self):
+        """Return conversations for the current user"""
+        # For detail views, return all conversations so we can look up by ID
+        if self.action in ['retrieve', 'update', 'partial_update', 'destroy', 'messages', 'send_message', 'mark_messages_read']:
+            return Conversation.objects.all()
+
+        # For testing, allow user_id parameter
+        user_id = self.request.query_params.get('user_id')
+        if user_id:
+            return Conversation.objects.filter(
+                Q(participant1_id=user_id) | Q(participant2_id=user_id)
+            )
+
+        if self.request.user.is_authenticated:
+            return Conversation.objects.filter(
+                Q(participant1=self.request.user) | Q(participant2=self.request.user)
+            )
+        return Conversation.objects.none()
+
+    def get_serializer_context(self):
+        """Add user_id to serializer context"""
+        context = super().get_serializer_context()
+        user_id = self.request.query_params.get('user_id')
+        logger.info(f"ConversationViewSet.get_serializer_context: user_id={user_id}")
+        if user_id:
+            context['user_id'] = user_id
+        logger.info(f"ConversationViewSet.get_serializer_context: context keys={context.keys()}")
+        return context
+
+    def create(self, request, *args, **kwargs):
+        """Create a new conversation or return existing one"""
+        user_id = request.data.get('user_id') or request.query_params.get('user_id')
+        other_user_id = request.data.get('other_user_id')
+
+        if not user_id or not other_user_id:
+            return Response(
+                {'error': 'Both user_id and other_user_id are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Ensure consistent ordering (smaller ID first)
+        if str(user_id) < str(other_user_id):
+            p1_id, p2_id = user_id, other_user_id
+        else:
+            p1_id, p2_id = other_user_id, user_id
+
+        # Check if conversation already exists
+        conversation = Conversation.objects.filter(
+            participant1_id=p1_id,
+            participant2_id=p2_id
+        ).first()
+
+        if not conversation:
+            # Create new conversation
+            conversation = Conversation.objects.create(
+                participant1_id=p1_id,
+                participant2_id=p2_id
+            )
+
+        serializer = self.get_serializer(conversation, context={'user_id': user_id})
+        return Response(serializer.data, status=status.HTTP_201_CREATED if not conversation else status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'])
+    def messages(self, request, pk=None):
+        """Get messages for a conversation"""
+        conversation = self.get_object()
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 50))
+
+        messages = conversation.messages.order_by('-created_at')
+        total = messages.count()
+
+        # Paginate
+        start = (page - 1) * page_size
+        end = start + page_size
+        messages_page = messages[start:end]
+
+        # Reverse to get oldest first for display
+        messages_page = list(reversed(messages_page))
+
+        serializer = MessageSerializer(messages_page, many=True)
+
+        return Response({
+            'results': serializer.data,
+            'count': total,
+            'page': page,
+            'page_size': page_size,
+            'has_more': end < total
+        })
+
+    @action(detail=True, methods=['post'])
+    def send_message(self, request, pk=None):
+        """Send a message in this conversation"""
+        conversation = self.get_object()
+        sender_id = request.data.get('sender_id')
+        content = request.data.get('content')
+
+        if not sender_id or not content:
+            return Response(
+                {'error': 'sender_id and content are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Determine receiver
+        if str(conversation.participant1_id) == str(sender_id):
+            receiver = conversation.participant2
+        else:
+            receiver = conversation.participant1
+
+        # Create message
+        message = Message.objects.create(
+            conversation=conversation,
+            sender_id=sender_id,
+            receiver=receiver,
+            content=content
+        )
+
+        # Update conversation's updated_at
+        conversation.save()  # This will update the auto_now field
+
+        serializer = MessageSerializer(message)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'])
+    def mark_messages_read(self, request, pk=None):
+        """Mark all messages in conversation as read for the current user"""
+        conversation = self.get_object()
+        user_id = request.data.get('user_id')
+
+        if not user_id:
+            return Response(
+                {'error': 'user_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Mark all unread messages where this user is the receiver as read
+        updated = conversation.messages.filter(
+            receiver_id=user_id,
+            is_read=False
+        ).update(is_read=True)
+
+        return Response({'marked_read': updated})
+
+    @action(detail=False, methods=['get'])
+    def unread_count(self, request):
+        """Get total unread message count across all conversations"""
+        user_id = request.query_params.get('user_id')
+
+        if user_id:
+            count = Message.objects.filter(
+                receiver_id=user_id,
+                is_read=False
+            ).count()
+        elif request.user.is_authenticated:
+            count = Message.objects.filter(
+                receiver=request.user,
+                is_read=False
+            ).count()
+        else:
+            count = 0
+
+        return Response({'count': count})

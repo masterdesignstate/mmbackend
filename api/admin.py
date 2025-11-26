@@ -12,10 +12,10 @@ class CustomUserAdmin(UserAdmin):
     search_fields = ['username', 'email', 'first_name', 'last_name', 'from_location', 'live']
     
     # Customize list display
-    list_display = ['username', 'email', 'first_name', 'last_name', 'from_location', 'live', 'age', 'is_online', 'is_active', 'date_joined']
-    
+    list_display = ['username', 'email', 'first_name', 'last_name', 'from_location', 'live', 'age', 'is_active', 'date_joined']
+
     # Add filters for easier browsing
-    list_filter = ['is_active', 'is_staff', 'is_superuser', 'is_online', 'is_banned', 'date_joined']
+    list_filter = ['is_active', 'is_staff', 'is_superuser', 'is_banned', 'date_joined']
     
     # Add ordering
     ordering = ['-date_joined']
@@ -26,7 +26,7 @@ class CustomUserAdmin(UserAdmin):
             'fields': ('profile_photo', 'age', 'date_of_birth', 'height', 'from_location', 'live', 'bio')
         }),
         ('Status', {
-            'fields': ('is_online', 'last_seen', 'is_banned', 'ban_reason', 'ban_date', 'questions_answered_count')
+            'fields': ('last_active', 'is_banned', 'ban_reason', 'ban_date', 'questions_answered_count')
         }),
     )
     
