@@ -1,7 +1,7 @@
 from rest_framework import viewsets, permissions, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from django.db.models import Q, Count, F
+from django.db.models import Q, Count, F, Exists, OuterRef
 from django.utils import timezone
 from datetime import timedelta
 import logging
@@ -209,10 +209,27 @@ class UserViewSet(viewsets.ModelViewSet):
         min_compatibility = float(request.query_params.get('min_compatibility', 0))
         max_compatibility = float(request.query_params.get('max_compatibility', 100))
         required_only = request.query_params.get('required_only', 'false').lower() == 'true'
-        
+
+        # Get age and distance filter parameters
+        min_age = request.query_params.get('min_age')
+        max_age = request.query_params.get('max_age')
+        min_distance = request.query_params.get('min_distance')
+        max_distance = request.query_params.get('max_distance')
+
+        if min_age:
+            min_age = int(min_age)
+        if max_age:
+            max_age = int(max_age)
+        if min_distance:
+            min_distance = int(min_distance)
+        if max_distance:
+            max_distance = int(max_distance)
+
         # Get tag filter parameters
         tags = request.query_params.getlist('tags')  # Get multiple tag values
         print(f"🔍 Tag filters: {tags}")
+        print(f"🔍 Age filters: min={min_age}, max={max_age}")
+        print(f"🔍 Distance filters: min={min_distance}, max={max_distance}")
 
         # Get pagination parameters
         page = int(request.query_params.get('page', 1))
@@ -256,6 +273,11 @@ class UserViewSet(viewsets.ModelViewSet):
                     if other_user.is_banned or other_user.id == request.user.id:
                         continue
                     if other_user.id in seen_candidate_ids:
+                        continue
+                    # Apply age filter
+                    if min_age is not None and (other_user.age is None or other_user.age < min_age):
+                        continue
+                    if max_age is not None and (other_user.age is None or other_user.age > max_age):
                         continue
                     candidate_users.append(other_user)
                     seen_candidate_ids.add(other_user.id)
@@ -327,6 +349,24 @@ class UserViewSet(viewsets.ModelViewSet):
                     key=lambda x: x['compatibility'].get(compatibility_field, 0.0),
                     reverse=True
                 )
+
+                # Exclude hidden users unless explicitly filtering for them
+                is_filtering_for_hidden = tags and any(tag.lower() in ['hidden', 'hide'] for tag in tags)
+                if not is_filtering_for_hidden:
+                    from .models import UserResult
+                    # Get IDs of users that the current user has hidden
+                    hidden_user_ids = UserResult.objects.filter(
+                        user=request.user,
+                        tag='hide'
+                    ).values_list('result_user_id', flat=True)
+                    
+                    if hidden_user_ids:
+                        # Filter out hidden users from results
+                        compatibility_results = [
+                            r for r in compatibility_results 
+                            if r['user'].id not in hidden_user_ids
+                        ]
+                        print(f"🚫 Excluded {len(hidden_user_ids)} hidden users from required-only results")
 
                 total_users = len(compatibility_results)
                 paginated_results = compatibility_results[offset:offset + page_size]
@@ -469,6 +509,38 @@ class UserViewSet(viewsets.ModelViewSet):
                         'has_next': False,
                         'message': 'No users match the selected tag filters'
                     })
+
+            # Apply age filters
+            if min_age is not None or max_age is not None:
+                if min_age is not None:
+                    compatibilities = compatibilities.filter(
+                        Q(user1=request.user, user2__age__gte=min_age) |
+                        Q(user2=request.user, user1__age__gte=min_age)
+                    )
+                if max_age is not None:
+                    compatibilities = compatibilities.filter(
+                        Q(user1=request.user, user2__age__lte=max_age) |
+                        Q(user2=request.user, user1__age__lte=max_age)
+                    )
+                print(f"🔍 Applied age filters: min={min_age}, max={max_age}")
+
+            # Exclude hidden users unless explicitly filtering for them
+            # This ensures we always return the requested number of non-hidden users per page
+            is_filtering_for_hidden = tags and any(tag.lower() in ['hidden', 'hide'] for tag in tags)
+            if not is_filtering_for_hidden:
+                from .models import UserResult
+                # Get IDs of users that the current user has hidden
+                hidden_user_ids = UserResult.objects.filter(
+                    user=request.user,
+                    tag='hide'
+                ).values_list('result_user_id', flat=True)
+
+                if hidden_user_ids:
+                    # Exclude hidden users from compatibilities
+                    compatibilities = compatibilities.exclude(
+                        Q(user1__id__in=hidden_user_ids) | Q(user2__id__in=hidden_user_ids)
+                    )
+                    print(f"🚫 Excluded {len(hidden_user_ids)} hidden users from results")
 
             # Check if we have sufficient pre-calculated data
             total_compatibilities = compatibilities.count()
@@ -1480,15 +1552,21 @@ class UserResultViewSet(viewsets.ModelViewSet):
         )
         logger.info(f"Created note notification from {sender.username} to {recipient.username}")
 
-        # Get or create conversation
+        # Get or create conversation with consistent ordering (smaller ID first)
+        if str(sender.id) < str(recipient.id):
+            p1_id, p2_id = sender.id, recipient.id
+        else:
+            p1_id, p2_id = recipient.id, sender.id
+
         conversation = Conversation.objects.filter(
-            Q(participant1=sender, participant2=recipient) | Q(participant1=recipient, participant2=sender)
+            participant1_id=p1_id,
+            participant2_id=p2_id
         ).first()
 
         if not conversation:
             conversation = Conversation.objects.create(
-                participant1=sender,
-                participant2=recipient
+                participant1_id=p1_id,
+                participant2_id=p2_id
             )
 
         # Create message in conversation
@@ -2017,23 +2095,51 @@ class ConversationViewSet(viewsets.ModelViewSet):
     ordering = ['-updated_at']
 
     def get_queryset(self):
-        """Return conversations for the current user"""
+        """Return conversations for the current user, only showing those with mutual likes (matches)"""
         # For detail views, return all conversations so we can look up by ID
         if self.action in ['retrieve', 'update', 'partial_update', 'destroy', 'messages', 'send_message', 'mark_messages_read']:
             return Conversation.objects.all()
 
         # For testing, allow user_id parameter
         user_id = self.request.query_params.get('user_id')
-        if user_id:
-            return Conversation.objects.filter(
-                Q(participant1_id=user_id) | Q(participant2_id=user_id)
+        current_user_id = user_id
+        
+        if not current_user_id and self.request.user.is_authenticated:
+            current_user_id = str(self.request.user.id)
+        
+        if not current_user_id:
+            return Conversation.objects.none()
+        
+        # Get conversations where the user is a participant
+        conversations = Conversation.objects.filter(
+            Q(participant1_id=current_user_id) | Q(participant2_id=current_user_id)
+        )
+        
+        # Filter to only show conversations where there's a mutual like (match)
+        # A match exists when:
+        # - participant1 has liked participant2 (UserResult with user=participant1, result_user=participant2, tag='like')
+        # - participant2 has liked participant1 (UserResult with user=participant2, result_user=participant1, tag='like')
+        
+        matched_conversations = conversations.filter(
+            # Check if participant1 has liked participant2
+            Exists(
+                UserResult.objects.filter(
+                    user_id=OuterRef('participant1_id'),
+                    result_user_id=OuterRef('participant2_id'),
+                    tag='like'
+                )
+            ),
+            # Check if participant2 has liked participant1
+            Exists(
+                UserResult.objects.filter(
+                    user_id=OuterRef('participant2_id'),
+                    result_user_id=OuterRef('participant1_id'),
+                    tag='like'
+                )
             )
-
-        if self.request.user.is_authenticated:
-            return Conversation.objects.filter(
-                Q(participant1=self.request.user) | Q(participant2=self.request.user)
-            )
-        return Conversation.objects.none()
+        )
+        
+        return matched_conversations
 
     def get_serializer_context(self):
         """Add user_id to serializer context"""
@@ -2044,6 +2150,53 @@ class ConversationViewSet(viewsets.ModelViewSet):
             context['user_id'] = user_id
         logger.info(f"ConversationViewSet.get_serializer_context: context keys={context.keys()}")
         return context
+
+    def list(self, request, *args, **kwargs):
+        """List conversations with deduplication for same user pairs"""
+        queryset = self.filter_queryset(self.get_queryset())
+        
+        # Deduplicate conversations that represent the same pair of users
+        # Group by normalized participant pair (smaller ID first)
+        conversation_map = {}
+        
+        for conv in queryset:
+            # Normalize participant order (smaller ID first)
+            p1_id = str(conv.participant1.id)
+            p2_id = str(conv.participant2.id)
+            if p1_id > p2_id:
+                p1_id, p2_id = p2_id, p1_id
+            
+            pair_key = f"{p1_id}_{p2_id}"
+            
+            # Keep the conversation with the most recent update, or if equal, the one with messages
+            if pair_key not in conversation_map:
+                conversation_map[pair_key] = conv
+            else:
+                existing = conversation_map[pair_key]
+                # Prefer conversation with messages, then most recent update
+                existing_has_messages = existing.messages.exists()
+                conv_has_messages = conv.messages.exists()
+                
+                if conv_has_messages and not existing_has_messages:
+                    conversation_map[pair_key] = conv
+                elif existing_has_messages and not conv_has_messages:
+                    pass  # Keep existing
+                elif conv.updated_at > existing.updated_at:
+                    conversation_map[pair_key] = conv
+        
+        # Convert back to queryset-like list
+        deduplicated_conversations = list(conversation_map.values())
+        
+        # Sort by updated_at descending
+        deduplicated_conversations.sort(key=lambda x: x.updated_at, reverse=True)
+        
+        page = self.paginate_queryset(deduplicated_conversations)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
+        serializer = self.get_serializer(deduplicated_conversations, many=True)
+        return Response(serializer.data)
 
     def create(self, request, *args, **kwargs):
         """Create a new conversation or return existing one"""
