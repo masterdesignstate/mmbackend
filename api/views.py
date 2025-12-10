@@ -368,6 +368,63 @@ class UserViewSet(viewsets.ModelViewSet):
                         ]
                         print(f"🚫 Excluded {len(hidden_user_ids)} hidden users from required-only results")
 
+                # Check for required questions and filter/sort accordingly
+                from .models import UserAnswer
+                # Get all questions that the current user has marked as required (me_importance === 5)
+                required_question_ids = set(
+                    UserAnswer.objects.filter(
+                        user=request.user,
+                        me_importance=5
+                    ).values_list('question_id', flat=True)
+                )
+                
+                if required_question_ids:
+                    print(f"🔍 Current user has {len(required_question_ids)} required questions (required_only path)")
+                    
+                    # Get all questions that each other user has answered
+                    other_user_ids = [r['user'].id for r in compatibility_results]
+                    other_user_answers = UserAnswer.objects.filter(
+                        user_id__in=other_user_ids
+                    ).values_list('user_id', 'question_id')
+                    
+                    # Build a map of user_id -> set of question_ids they've answered
+                    user_answered_questions = {}
+                    for user_id, question_id in other_user_answers:
+                        if user_id not in user_answered_questions:
+                            user_answered_questions[user_id] = set()
+                        user_answered_questions[user_id].add(question_id)
+                    
+                    # Separate users into two groups: those who answered all required questions and those who didn't
+                    users_with_all_required = []
+                    users_missing_required = []
+                    
+                    for result in compatibility_results:
+                        other_user_id = result['user'].id
+                        answered_questions = user_answered_questions.get(other_user_id, set())
+                        
+                        # Check if they've answered all required questions
+                        if required_question_ids.issubset(answered_questions):
+                            users_with_all_required.append(result)
+                        else:
+                            # Set compatibility to 0 for users missing required questions
+                            result['compatibility'] = {
+                                'overall_compatibility': 0.0,
+                                'compatible_with_me': 0.0,
+                                'im_compatible_with': 0.0,
+                                'mutual_questions_count': result['compatibility'].get('mutual_questions_count', 0)
+                            }
+                            users_missing_required.append(result)
+                    
+                    # Sort users with all required questions by compatibility (descending)
+                    users_with_all_required.sort(
+                        key=lambda x: x['compatibility'].get(compatibility_field, 0.0),
+                        reverse=True
+                    )
+                    
+                    # Combine: users with all required first, then users missing required
+                    compatibility_results = users_with_all_required + users_missing_required
+                    print(f"🔍 Reordered results (required_only): {len(users_with_all_required)} users with all required questions, {len(users_missing_required)} users missing required questions")
+
                 total_users = len(compatibility_results)
                 paginated_results = compatibility_results[offset:offset + page_size]
 
@@ -569,6 +626,63 @@ class UserViewSet(viewsets.ModelViewSet):
                     }
                 })
 
+            # Check for required questions and filter/sort accordingly
+            from .models import UserAnswer
+            # Get all questions that the current user has marked as required (me_importance === 5)
+            required_question_ids = set(
+                UserAnswer.objects.filter(
+                    user=request.user,
+                    me_importance=5
+                ).values_list('question_id', flat=True)
+            )
+            
+            if required_question_ids:
+                print(f"🔍 Current user has {len(required_question_ids)} required questions")
+                
+                # Get all questions that each other user has answered
+                other_user_ids = [item['user']['id'] for item in response_data]
+                other_user_answers = UserAnswer.objects.filter(
+                    user_id__in=other_user_ids
+                ).values_list('user_id', 'question_id')
+                
+                # Build a map of user_id -> set of question_ids they've answered
+                user_answered_questions = {}
+                for user_id, question_id in other_user_answers:
+                    if user_id not in user_answered_questions:
+                        user_answered_questions[user_id] = set()
+                    user_answered_questions[user_id].add(question_id)
+                
+                # Separate users into two groups: those who answered all required questions and those who didn't
+                users_with_all_required = []
+                users_missing_required = []
+                
+                for item in response_data:
+                    other_user_id = item['user']['id']
+                    answered_questions = user_answered_questions.get(other_user_id, set())
+                    
+                    # Check if they've answered all required questions
+                    if required_question_ids.issubset(answered_questions):
+                        users_with_all_required.append(item)
+                    else:
+                        # Set compatibility to 0 for users missing required questions
+                        item['compatibility'] = {
+                            'overall_compatibility': 0.0,
+                            'compatible_with_me': 0.0,
+                            'im_compatible_with': 0.0,
+                            'mutual_questions_count': item['compatibility']['mutual_questions_count']
+                        }
+                        users_missing_required.append(item)
+                
+                # Sort users with all required questions by compatibility (descending)
+                users_with_all_required.sort(
+                    key=lambda x: x['compatibility']['overall_compatibility'] or 0,
+                    reverse=True
+                )
+                
+                # Combine: users with all required first, then users missing required
+                response_data = users_with_all_required + users_missing_required
+                print(f"🔍 Reordered results: {len(users_with_all_required)} users with all required questions, {len(users_missing_required)} users missing required questions")
+
             logger.info(f"Returning {len(response_data)} compatible users from pre-calculated data")
 
             return Response({
@@ -698,7 +812,11 @@ class QuestionViewSet(viewsets.ModelViewSet):
 
         # Filter by is_approved=True by default (hide unapproved questions from public)
         # Allow override via query param for admin endpoints
-        include_unapproved = self.request.query_params.get('include_unapproved', 'false').lower() == 'true'
+        # Also allow update/partial_update actions to access unapproved questions
+        include_unapproved = (
+            self.request.query_params.get('include_unapproved', 'false').lower() == 'true' or
+            self.action in ['update', 'partial_update', 'destroy']
+        )
         if not include_unapproved:
             queryset = queryset.filter(is_approved=True)
 
@@ -915,6 +1033,14 @@ class QuestionViewSet(viewsets.ModelViewSet):
         try:
             question = self.get_object()
             
+            # Check if this is a PATCH request with only is_approved field (simple toggle)
+            if request.method == 'PATCH' and 'is_approved' in request.data and len(request.data) == 1:
+                question.is_approved = request.data.get('is_approved')
+                question.save(update_fields=['is_approved'])
+                logger.info(f"Question approval toggled via PATCH: {question.id}, is_approved={question.is_approved}")
+                serializer = self.get_serializer(question)
+                return Response(serializer.data)
+            
             # Extract data from request
             text = request.data.get('text', '').strip()
             question_name = request.data.get('question_name', '').strip()
@@ -934,7 +1060,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
             is_group = request.data.get('is_group', question.is_group)
             answers = request.data.get('answers', [])
             
-            # Validate required fields
+            # Validate required fields (skip for PATCH with only is_approved)
             if not text:
                 return Response({
                     'error': 'Question text is required'
@@ -1043,6 +1169,24 @@ class QuestionViewSet(viewsets.ModelViewSet):
             logger.error(f"Error rejecting question: {e}")
             return Response({
                 'error': 'Failed to reject question'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['patch', 'post'])
+    def toggle_approval(self, request, pk=None):
+        """Toggle question approval status"""
+        try:
+            question = self.get_object()
+            question.is_approved = not question.is_approved
+            question.save(update_fields=['is_approved'])
+
+            logger.info(f"Question approval toggled: {question.id}, is_approved={question.is_approved}")
+
+            serializer = self.get_serializer(question)
+            return Response(serializer.data)
+        except Exception as e:
+            logger.error(f"Error toggling approval: {e}", exc_info=True)
+            return Response({
+                'error': f'Failed to toggle approval: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=False, methods=['get'])

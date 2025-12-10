@@ -920,7 +920,7 @@ def delete_question(request, question_id):
         }
         
         print(f"📤 Sending response: {response_data}")
-        return JsonResponse(response_data, status=204)
+        return JsonResponse(response_data, status=200)
         
     except Exception as e:
         print(f"❌ Error deleting question: {str(e)}")
