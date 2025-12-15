@@ -209,7 +209,7 @@ class UserViewSet(viewsets.ModelViewSet):
         min_compatibility = float(request.query_params.get('min_compatibility', 0))
         max_compatibility = float(request.query_params.get('max_compatibility', 100))
         required_only = request.query_params.get('required_only', 'false').lower() == 'true'
-
+        
         # Get age and distance filter parameters
         min_age = request.query_params.get('min_age')
         max_age = request.query_params.get('max_age')
@@ -2257,8 +2257,8 @@ class ConversationViewSet(viewsets.ModelViewSet):
         # Get conversations where the user is a participant
         conversations = Conversation.objects.filter(
             Q(participant1_id=current_user_id) | Q(participant2_id=current_user_id)
-        )
-        
+            )
+
         # Filter to only show conversations where there's a mutual like (match)
         # A match exists when:
         # - participant1 has liked participant2 (UserResult with user=participant1, result_user=participant2, tag='like')
