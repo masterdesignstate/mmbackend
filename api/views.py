@@ -254,207 +254,28 @@ class UserViewSet(viewsets.ModelViewSet):
                 'im_compatible_with': 'im_compatible_with',
             }.get(compatibility_type, 'overall_compatibility')
 
-            if required_only:
-                logger.info("Using real-time calculation for required-only filter")
-                from .services.compatibility_service import CompatibilityService
-
-                start_time = time.monotonic()
-                max_candidates = 60
-
-                compat_candidates = Compatibility.objects.filter(
-                    Q(user1=request.user) | Q(user2=request.user)
-                ).select_related('user1', 'user2').order_by('-overall_compatibility')[:max_candidates * 3]
-
-                candidate_users: list[User] = []
-                seen_candidate_ids = set()
-
-                for comp in compat_candidates:
-                    other_user = comp.user2 if comp.user1 == request.user else comp.user1
-                    if other_user.is_banned or other_user.id == request.user.id:
-                        continue
-                    if other_user.id in seen_candidate_ids:
-                        continue
-                    # Apply age filter
-                    if min_age is not None and (other_user.age is None or other_user.age < min_age):
-                        continue
-                    if max_age is not None and (other_user.age is None or other_user.age > max_age):
-                        continue
-                    candidate_users.append(other_user)
-                    seen_candidate_ids.add(other_user.id)
-                    if len(candidate_users) >= max_candidates:
-                        break
-
-                if not candidate_users:
-                    candidate_users = list(
-                        User.objects.exclude(id=request.user.id)
-                        .exclude(is_banned=True)
-                        .filter(answers__isnull=False)
-                        .distinct()[:max_candidates]
-                    )
-
-                candidate_ids = [user.id for user in candidate_users]
-
-                answer_qs = UserAnswer.objects.filter(
-                    Q(user=request.user) | Q(user__in=candidate_ids)
-                ).filter(question__is_required_for_match=True).only(
-                    'user_id',
-                    'question_id',
-                    'me_answer',
-                    'me_open_to_all',
-                    'me_importance',
-                    'looking_for_answer',
-                    'looking_for_open_to_all',
-                    'looking_for_importance',
-                )
-
-                answers_by_user: dict[object, list[UserAnswer]] = defaultdict(list)
-                for answer in answer_qs:
-                    answers_by_user[answer.user_id].append(answer)
-
-                current_user_answers = answers_by_user.get(request.user.id, [])
-
-                if not current_user_answers:
-                    logger.info("Required-only: current user has no required-question answers; returning empty result set")
-                    return Response({
-                        'results': [],
-                        'count': 0,
-                        'total_count': 0,
-                        'page': page,
-                        'page_size': page_size,
-                        'has_next': False,
-                        'message': 'No required-question matches available'
-                    })
-
-                compatibility_results = []
-                for other_user in candidate_users:
-                    other_answers = answers_by_user.get(other_user.id, [])
-                    if not other_answers or not current_user_answers:
-                        continue
-                    compatibility_data = CompatibilityService.calculate_compatibility_between_users(
-                        request.user,
-                        other_user,
-                        required_only=True,
-                        user1_answers=current_user_answers,
-                        user2_answers=other_answers,
-                    )
-                    score = compatibility_data.get(compatibility_field, 0.0)
-                    if score < min_compatibility or score > max_compatibility:
-                        continue
-                    compatibility_results.append({
-                        'user': other_user,
-                        'compatibility': compatibility_data
-                    })
-
-                compatibility_results.sort(
-                    key=lambda x: x['compatibility'].get(compatibility_field, 0.0),
-                    reverse=True
-                )
-
-                # Exclude hidden users unless explicitly filtering for them
-                is_filtering_for_hidden = tags and any(tag.lower() in ['hidden', 'hide'] for tag in tags)
-                if not is_filtering_for_hidden:
-                    from .models import UserResult
-                    # Get IDs of users that the current user has hidden
-                    hidden_user_ids = UserResult.objects.filter(
-                        user=request.user,
-                        tag='hide'
-                    ).values_list('result_user_id', flat=True)
-                    
-                    if hidden_user_ids:
-                        # Filter out hidden users from results
-                        compatibility_results = [
-                            r for r in compatibility_results 
-                            if r['user'].id not in hidden_user_ids
-                        ]
-                        print(f"🚫 Excluded {len(hidden_user_ids)} hidden users from required-only results")
-
-                # Check for required questions and filter/sort accordingly
-                from .models import UserAnswer
-                # Get all questions that the current user has marked as required (me_importance === 5)
-                required_question_ids = set(
-                    UserAnswer.objects.filter(
-                        user=request.user,
-                        me_importance=5
-                    ).values_list('question_id', flat=True)
-                )
-                
-                if required_question_ids:
-                    print(f"🔍 Current user has {len(required_question_ids)} required questions (required_only path)")
-                    
-                    # Get all questions that each other user has answered
-                    other_user_ids = [r['user'].id for r in compatibility_results]
-                    other_user_answers = UserAnswer.objects.filter(
-                        user_id__in=other_user_ids
-                    ).values_list('user_id', 'question_id')
-                    
-                    # Build a map of user_id -> set of question_ids they've answered
-                    user_answered_questions = {}
-                    for user_id, question_id in other_user_answers:
-                        if user_id not in user_answered_questions:
-                            user_answered_questions[user_id] = set()
-                        user_answered_questions[user_id].add(question_id)
-                    
-                    # Separate users into two groups: those who answered all required questions and those who didn't
-                    users_with_all_required = []
-                    users_missing_required = []
-                    
-                    for result in compatibility_results:
-                        other_user_id = result['user'].id
-                        answered_questions = user_answered_questions.get(other_user_id, set())
-                        
-                        # Check if they've answered all required questions
-                        if required_question_ids.issubset(answered_questions):
-                            users_with_all_required.append(result)
-                        else:
-                            # Set compatibility to 0 for users missing required questions
-                            result['compatibility'] = {
-                                'overall_compatibility': 0.0,
-                                'compatible_with_me': 0.0,
-                                'im_compatible_with': 0.0,
-                                'mutual_questions_count': result['compatibility'].get('mutual_questions_count', 0)
-                            }
-                            users_missing_required.append(result)
-                    
-                    # Sort users with all required questions by compatibility (descending)
-                    users_with_all_required.sort(
-                        key=lambda x: x['compatibility'].get(compatibility_field, 0.0),
-                        reverse=True
-                    )
-                    
-                    # Combine: users with all required first, then users missing required
-                    compatibility_results = users_with_all_required + users_missing_required
-                    print(f"🔍 Reordered results (required_only): {len(users_with_all_required)} users with all required questions, {len(users_missing_required)} users missing required questions")
-
-                total_users = len(compatibility_results)
-                paginated_results = compatibility_results[offset:offset + page_size]
-
-                response_data = []
-                for result in paginated_results:
-                    user_serializer = SimpleUserSerializer(result['user'])
-                    response_data.append({
-                        'user': user_serializer.data,
-                        'compatibility': result['compatibility']
-                    })
-
-                duration = time.monotonic() - start_time
-                logger.info(
-                    "Required-only calculation returned %s users (checked %s candidates) in %.2fs",
-                    len(response_data),
-                    len(candidate_users),
-                    duration,
-                )
-
-                return Response({
-                    'results': response_data,
-                    'count': len(response_data),
-                    'total_count': total_users,
-                    'page': page,
-                    'page_size': page_size,
-                    'has_next': offset + page_size < total_users,
-                    'message': f"Showing {len(response_data)} users from {total_users} total ranked by compatibility (real-time)"
-                })
+            apply_required_filter = required_only
 
             # Use pre-calculated compatibilities for instant ranking of ALL users
+            if compatibility_type == 'compatible_with_me':
+                compatibility_score_expression = Case(
+                    When(user1=request.user, then='compatible_with_me'),
+                    default='im_compatible_with',
+                    output_field=FloatField()
+                )
+            elif compatibility_type == 'im_compatible_with':
+                compatibility_score_expression = Case(
+                    When(user1=request.user, then='im_compatible_with'),
+                    default='compatible_with_me',
+                    output_field=FloatField()
+                )
+            else:
+                compatibility_score_expression = Case(
+                    When(user1=request.user, then='overall_compatibility'),
+                    default='overall_compatibility',
+                    output_field=FloatField()
+                )
+
             compatibilities = Compatibility.objects.filter(
                 Q(user1=request.user) | Q(user2=request.user)
             ).select_related('user1', 'user2').annotate(
@@ -463,17 +284,15 @@ class UserViewSet(viewsets.ModelViewSet):
                     When(user1=request.user, then='user2__id'),
                     default='user1__id'
                 ),
-                compatibility_score=Case(
-                    When(user1=request.user, then='overall_compatibility'),
-                    default='overall_compatibility'
-                )
+                compatibility_score=compatibility_score_expression
             ).order_by('-compatibility_score')
 
-            # Apply compatibility filters
-            if min_compatibility > 0:
-                compatibilities = compatibilities.filter(overall_compatibility__gte=min_compatibility)
-            if max_compatibility < 100:
-                compatibilities = compatibilities.filter(overall_compatibility__lte=max_compatibility)
+            # Apply compatibility filters based on selected compatibility type
+            if not apply_required_filter:
+                if min_compatibility > 0:
+                    compatibilities = compatibilities.filter(compatibility_score__gte=min_compatibility)
+                if max_compatibility < 100:
+                    compatibilities = compatibilities.filter(compatibility_score__lte=max_compatibility)
 
             # Apply tag filters
             if tags:
@@ -599,6 +418,150 @@ class UserViewSet(viewsets.ModelViewSet):
                     )
                     print(f"🚫 Excluded {len(hidden_user_ids)} hidden users from results")
 
+            if apply_required_filter:
+                compatibility_results = []
+
+                for comp in compatibilities:
+                    # Determine which user is the "other" user
+                    other_user = comp.user2 if comp.user1 == request.user else comp.user1
+
+                    # Skip banned users
+                    if other_user.is_banned:
+                        continue
+
+                    compatibility_results.append({
+                        'user': other_user,
+                        'compatibility': {
+                            'overall_compatibility': comp.overall_compatibility,
+                            'compatible_with_me': comp.compatible_with_me if comp.user1 == request.user else comp.im_compatible_with,
+                            'im_compatible_with': comp.im_compatible_with if comp.user1 == request.user else comp.compatible_with_me,
+                            'mutual_questions_count': comp.mutual_questions_count
+                        },
+                        'missing_required': False
+                    })
+
+                # Get all questions that the current user has marked as required (me_importance === 5)
+                required_question_ids = set(
+                    UserAnswer.objects.filter(
+                        user=request.user,
+                        me_importance=5
+                    ).values_list('question_id', flat=True)
+                )
+
+                missing_user_ids = []
+                if required_question_ids:
+                    print(f"🔍 Current user has {len(required_question_ids)} required questions (required filter)")
+
+                    other_user_ids = [item['user'].id for item in compatibility_results]
+                    other_user_answers = UserAnswer.objects.filter(
+                        user_id__in=other_user_ids,
+                        question_id__in=required_question_ids
+                    ).values_list('user_id', 'question_id')
+
+                    user_answered_questions: dict[object, set] = defaultdict(set)
+                    for user_id, question_id in other_user_answers:
+                        user_answered_questions[user_id].add(question_id)
+
+                    for item in compatibility_results:
+                        other_user_id = item['user'].id
+                        answered_questions = user_answered_questions.get(other_user_id, set())
+                        item['missing_required'] = not required_question_ids.issubset(answered_questions)
+                        if item['missing_required']:
+                            missing_user_ids.append(other_user_id)
+
+                if missing_user_ids:
+                    current_user_non_required_answers = list(
+                        UserAnswer.objects.filter(
+                            user=request.user
+                        ).exclude(
+                            question_id__in=required_question_ids
+                        ).only(
+                            'question_id',
+                            'me_answer',
+                            'me_open_to_all',
+                            'me_importance',
+                            'looking_for_answer',
+                            'looking_for_open_to_all',
+                            'looking_for_importance',
+                        )
+                    )
+
+                    other_answers_qs = UserAnswer.objects.filter(
+                        user_id__in=missing_user_ids
+                    ).exclude(
+                        question_id__in=required_question_ids
+                    ).only(
+                        'user_id',
+                        'question_id',
+                        'me_answer',
+                        'me_open_to_all',
+                        'me_importance',
+                        'looking_for_answer',
+                        'looking_for_open_to_all',
+                        'looking_for_importance',
+                    )
+
+                    answers_by_user: dict[object, list[UserAnswer]] = defaultdict(list)
+                    for answer in other_answers_qs:
+                        answers_by_user[answer.user_id].append(answer)
+
+                    for item in compatibility_results:
+                        if not item['missing_required']:
+                            continue
+                        other_answers = answers_by_user.get(item['user'].id, [])
+                        item['compatibility_non_required'] = CompatibilityService.calculate_compatibility_between_users(
+                            request.user,
+                            item['user'],
+                            exclude_required=True,
+                            user1_answers=current_user_non_required_answers,
+                            user2_answers=other_answers,
+                        )
+
+                def get_sort_score(result: dict) -> float:
+                    if result.get('missing_required') and result.get('compatibility_non_required'):
+                        return float(result['compatibility_non_required'].get(compatibility_field, 0.0) or 0.0)
+                    return float(result['compatibility'].get(compatibility_field, 0.0) or 0.0)
+
+                compatibility_results = [
+                    result for result in compatibility_results
+                    if min_compatibility <= get_sort_score(result) <= max_compatibility
+                ]
+
+                compatibility_results.sort(
+                    key=lambda result: (
+                        result.get('missing_required', False),
+                        -get_sort_score(result),
+                        str(result['user'].id)
+                    )
+                )
+
+                total_users = len(compatibility_results)
+                paginated_results = compatibility_results[offset:offset + page_size]
+
+                response_data = []
+                for result in paginated_results:
+                    user_serializer = SimpleUserSerializer(result['user'])
+                    response_item = {
+                        'user': user_serializer.data,
+                        'compatibility': result['compatibility'],
+                        'missing_required': result.get('missing_required', False)
+                    }
+                    if result.get('compatibility_non_required'):
+                        response_item['compatibility_non_required'] = result['compatibility_non_required']
+                    response_data.append(response_item)
+
+                logger.info(f"Returning {len(response_data)} compatible users with required filter applied")
+
+                return Response({
+                    'results': response_data,
+                    'count': len(response_data),
+                    'total_count': total_users,
+                    'page': page,
+                    'page_size': page_size,
+                    'has_next': offset + page_size < total_users,
+                    'message': f'Showing {len(response_data)} users from {total_users} total ranked by compatibility'
+                })
+
             # Check if we have sufficient pre-calculated data
             total_compatibilities = compatibilities.count()
 
@@ -625,63 +588,6 @@ class UserViewSet(viewsets.ModelViewSet):
                         'mutual_questions_count': comp.mutual_questions_count
                     }
                 })
-
-            # Check for required questions and filter/sort accordingly
-            from .models import UserAnswer
-            # Get all questions that the current user has marked as required (me_importance === 5)
-            required_question_ids = set(
-                UserAnswer.objects.filter(
-                    user=request.user,
-                    me_importance=5
-                ).values_list('question_id', flat=True)
-            )
-            
-            if required_question_ids:
-                print(f"🔍 Current user has {len(required_question_ids)} required questions")
-                
-                # Get all questions that each other user has answered
-                other_user_ids = [item['user']['id'] for item in response_data]
-                other_user_answers = UserAnswer.objects.filter(
-                    user_id__in=other_user_ids
-                ).values_list('user_id', 'question_id')
-                
-                # Build a map of user_id -> set of question_ids they've answered
-                user_answered_questions = {}
-                for user_id, question_id in other_user_answers:
-                    if user_id not in user_answered_questions:
-                        user_answered_questions[user_id] = set()
-                    user_answered_questions[user_id].add(question_id)
-                
-                # Separate users into two groups: those who answered all required questions and those who didn't
-                users_with_all_required = []
-                users_missing_required = []
-                
-                for item in response_data:
-                    other_user_id = item['user']['id']
-                    answered_questions = user_answered_questions.get(other_user_id, set())
-                    
-                    # Check if they've answered all required questions
-                    if required_question_ids.issubset(answered_questions):
-                        users_with_all_required.append(item)
-                    else:
-                        # Set compatibility to 0 for users missing required questions
-                        item['compatibility'] = {
-                            'overall_compatibility': 0.0,
-                            'compatible_with_me': 0.0,
-                            'im_compatible_with': 0.0,
-                            'mutual_questions_count': item['compatibility']['mutual_questions_count']
-                        }
-                        users_missing_required.append(item)
-                
-                # Sort users with all required questions by compatibility (descending)
-                users_with_all_required.sort(
-                    key=lambda x: x['compatibility']['overall_compatibility'] or 0,
-                    reverse=True
-                )
-                
-                # Combine: users with all required first, then users missing required
-                response_data = users_with_all_required + users_missing_required
-                print(f"🔍 Reordered results: {len(users_with_all_required)} users with all required questions, {len(users_missing_required)} users missing required questions")
 
             logger.info(f"Returning {len(response_data)} compatible users from pre-calculated data")
 
@@ -986,6 +892,13 @@ class QuestionViewSet(viewsets.ModelViewSet):
             serializer.is_valid(raise_exception=True)
             question = serializer.save()
             
+            # Invalidate metadata cache if question is approved (so it appears in questions list immediately)
+            if question.is_approved:
+                from django.core.cache import cache
+                cache_key = 'questions_metadata_v2'
+                cache_deleted = cache.delete(cache_key)
+                logger.info(f"Question created and approved: {question.id}, question_number: {question.question_number}, cache invalidated (deleted: {cache_deleted})")
+            
             # Add tags
             for tag_name in tags:
                 tag, created = Tag.objects.get_or_create(name=tag_name.lower())
@@ -1035,9 +948,18 @@ class QuestionViewSet(viewsets.ModelViewSet):
             
             # Check if this is a PATCH request with only is_approved field (simple toggle)
             if request.method == 'PATCH' and 'is_approved' in request.data and len(request.data) == 1:
+                from django.core.cache import cache
+                old_approved_status = question.is_approved
                 question.is_approved = request.data.get('is_approved')
                 question.save(update_fields=['is_approved'])
-                logger.info(f"Question approval toggled via PATCH: {question.id}, is_approved={question.is_approved}")
+                
+                # Invalidate metadata cache if approval status actually changed
+                if old_approved_status != question.is_approved:
+                    cache.delete('questions_metadata_v2')
+                    logger.info(f"Question approval toggled via PATCH: {question.id}, is_approved={question.is_approved}, cache invalidated")
+                else:
+                    logger.info(f"Question approval unchanged via PATCH: {question.id}, is_approved={question.is_approved}")
+                
                 serializer = self.get_serializer(question)
                 return Response(serializer.data)
             
@@ -1095,9 +1017,18 @@ class QuestionViewSet(viewsets.ModelViewSet):
                 'is_group': is_group,
             }
             
+            # Check if approval status is changing
+            from django.core.cache import cache
+            old_approved_status = question.is_approved
+            
             serializer = self.get_serializer(question, data=question_data, partial=True)
             serializer.is_valid(raise_exception=True)
             updated_question = serializer.save()
+            
+            # Invalidate metadata cache if approval status changed
+            if old_approved_status != updated_question.is_approved:
+                cache.delete('questions_metadata_v2')
+                logger.info(f"Question approval changed during update: {updated_question.id}, is_approved={updated_question.is_approved}, cache invalidated")
             
             # Clear existing tags and add new ones
             updated_question.tags.clear()
@@ -1138,12 +1069,16 @@ class QuestionViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
         """Approve a question (admin only)"""
+        from django.core.cache import cache
         try:
             question = self.get_object()
             question.is_approved = True
             question.save()
 
-            logger.info(f"Question approved: {question.id}")
+            # Invalidate metadata cache when approval status changes
+            cache_key = 'questions_metadata_v2'
+            cache_deleted = cache.delete(cache_key)
+            logger.info(f"Question approved: {question.id}, question_number: {question.question_number}, cache invalidated (deleted: {cache_deleted})")
 
             serializer = self.get_serializer(question)
             return Response(serializer.data)
@@ -1156,12 +1091,15 @@ class QuestionViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
         """Reject a question (admin only)"""
+        from django.core.cache import cache
         try:
             question = self.get_object()
             question.is_approved = False
             question.save()
 
-            logger.info(f"Question rejected: {question.id}")
+            # Invalidate metadata cache when approval status changes
+            cache.delete('questions_metadata_v2')
+            logger.info(f"Question rejected: {question.id}, cache invalidated")
 
             serializer = self.get_serializer(question)
             return Response(serializer.data)
@@ -1174,12 +1112,15 @@ class QuestionViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['patch', 'post'])
     def toggle_approval(self, request, pk=None):
         """Toggle question approval status"""
+        from django.core.cache import cache
         try:
             question = self.get_object()
             question.is_approved = not question.is_approved
             question.save(update_fields=['is_approved'])
 
-            logger.info(f"Question approval toggled: {question.id}, is_approved={question.is_approved}")
+            # Invalidate metadata cache when approval status changes
+            cache.delete('questions_metadata_v2')
+            logger.info(f"Question approval toggled: {question.id}, is_approved={question.is_approved}, cache invalidated")
 
             serializer = self.get_serializer(question)
             return Response(serializer.data)
@@ -1232,18 +1173,37 @@ class QuestionViewSet(viewsets.ModelViewSet):
         from django.core.cache import cache
         from django.db.models import Count
 
-        # Try to get from cache first (5 minute TTL)
+        # Check if client wants to bypass cache (for immediate refresh after approval)
+        bypass_cache = request.query_params.get('bypass_cache', 'false').lower() == 'true'
+        
+        # Try to get from cache first (5 minute TTL) - unless bypass is requested
         cache_key = 'questions_metadata_v2'  # Changed version to force cache refresh
-        cached_data = cache.get(cache_key)
+        cached_data = None if bypass_cache else cache.get(cache_key)
 
         if cached_data:
-            logger.info("Returning cached question metadata")
+            logger.info(f"Returning cached question metadata (bypass_cache={bypass_cache})")
+            # Log what question numbers are in cache for debugging
+            cached_question_numbers = cached_data.get('distinct_question_numbers', [])
+            logger.info(f"Cached metadata contains {len(cached_question_numbers)} question numbers")
+            logger.info(f"Has question 18 in cache? {18 in cached_question_numbers}")
             return Response(cached_data)
+        
+        if bypass_cache:
+            logger.info("Bypassing cache for metadata request (fresh data requested)")
 
         # Get distinct question numbers using database aggregation (fast with index)
         # Only include approved questions
         distinct_numbers = Question.objects.filter(is_approved=True).values('question_number').distinct().order_by('question_number')
         question_numbers = [item['question_number'] for item in distinct_numbers]
+        
+        # Debug logging
+        logger.info(f"Fresh metadata query: Found {len(question_numbers)} distinct approved question numbers")
+        logger.info(f"Question numbers: {question_numbers}")
+        logger.info(f"Has question 18? {18 in question_numbers}")
+        # Check if question 18 exists and is approved
+        q18_exists = Question.objects.filter(question_number=18).exists()
+        q18_approved = Question.objects.filter(question_number=18, is_approved=True).exists()
+        logger.info(f"Question 18 exists: {q18_exists}, is_approved: {q18_approved}")
 
         # Calculate answer counts efficiently using aggregation
         answer_counts = {}
@@ -1282,8 +1242,8 @@ class QuestionViewSet(viewsets.ModelViewSet):
             'answer_counts': answer_counts
         }
 
-        # Cache for 5 minutes
-        cache.set(cache_key, metadata, 300)
+        # Cache for 1 minute (60 seconds) - faster updates while still maintaining performance
+        cache.set(cache_key, metadata, 60)
 
         logger.info(f"Generated question metadata: {len(question_numbers)} question groups")
         return Response(metadata)

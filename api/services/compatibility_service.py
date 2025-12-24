@@ -102,6 +102,7 @@ class CompatibilityService:
         user1: User,
         user2: User,
         required_only: bool = False,
+        exclude_required: bool = False,
         user1_answers: Optional[List[UserAnswer]] = None,
         user2_answers: Optional[List[UserAnswer]] = None,
     ) -> Dict[str, float]:
@@ -113,9 +114,13 @@ class CompatibilityService:
             user1: First user
             user2: Second user
             required_only: If True, only use questions marked as required for matching
+            exclude_required: If True, caller is expected to supply answers with required questions removed
         """
-        # Check cache first (different cache key for required_only)
-        cache_suffix = "_required" if required_only else ""
+        if required_only and exclude_required:
+            raise ValueError("required_only and exclude_required cannot both be True")
+
+        # Check cache first (different cache key for required_only/exclude_required)
+        cache_suffix = "_required" if required_only else "_exclude_required" if exclude_required else ""
         cache_key = f"compatibility_{min(user1.id, user2.id)}_{max(user1.id, user2.id)}{cache_suffix}"
         cached_result = cache.get(cache_key)
         if cached_result:
