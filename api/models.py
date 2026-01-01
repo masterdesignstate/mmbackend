@@ -92,6 +92,40 @@ class Question(models.Model):
         return self.text[:50]
 
 
+class QuestionNumberCounter(models.Model):
+    """Counter for allocating unique question numbers atomically"""
+    id = models.IntegerField(primary_key=True, default=1, editable=False)
+    last_number = models.PositiveIntegerField(default=0, help_text="Last allocated question number")
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'question_number_counter'
+        verbose_name = 'Question Number Counter'
+        verbose_name_plural = 'Question Number Counter'
+    
+    def __str__(self):
+        return f"Counter (last_number={self.last_number})"
+    
+    @classmethod
+    def get_or_create_counter(cls):
+        """Get or create the singleton counter instance"""
+        counter, created = cls.objects.get_or_create(
+            id=1,
+            defaults={'last_number': 0}
+        )
+        return counter
+    
+    @classmethod
+    def allocate_next_number(cls):
+        """Atomically allocate the next question number"""
+        from django.db import transaction
+        with transaction.atomic():
+            counter = cls.objects.select_for_update().get(pk=1)
+            counter.last_number += 1
+            counter.save(update_fields=['last_number'])
+            return counter.last_number
+
+
 class QuestionAnswer(models.Model):
     """Answers for questions"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

@@ -794,7 +794,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
             text = request.data.get('text', '').strip()
             user_id = request.data.get('user_id')  # Get user_id from frontend
             question_name = request.data.get('question_name', '').strip()
-            question_number = request.data.get('question_number')
+            # question_number is NOT accepted from client - assigned only on approval
             group_number = request.data.get('group_number')
             group_name = request.data.get('group_name', '').strip()
             group_name_text = request.data.get('group_name_text', '').strip()
@@ -869,10 +869,11 @@ class QuestionViewSet(viewsets.ModelViewSet):
                 submitted_by_user = request.user
             
             # Create the question
+            # question_number is always None on create - assigned only on approval
             question_data = {
                 'text': text,
                 'question_name': question_name or text[:50],  # Use text as name if not provided
-                'question_number': question_number,
+                'question_number': None,  # Always None on create - assigned only on approval
                 'group_number': group_number,
                 'group_name': group_name,
                 'group_name_text': group_name_text,
@@ -887,6 +888,11 @@ class QuestionViewSet(viewsets.ModelViewSet):
                 'open_to_all_looking_for': open_to_all_looking_for,
                 'is_group': is_group,
             }
+            
+            # If question is being created as approved, assign number atomically
+            if is_approved:
+                from .models import QuestionNumberCounter
+                question_data['question_number'] = QuestionNumberCounter.allocate_next_number()
             
             serializer = self.get_serializer(data=question_data)
             serializer.is_valid(raise_exception=True)
@@ -949,14 +955,27 @@ class QuestionViewSet(viewsets.ModelViewSet):
             # Check if this is a PATCH request with only is_approved field (simple toggle)
             if request.method == 'PATCH' and 'is_approved' in request.data and len(request.data) == 1:
                 from django.core.cache import cache
+                from .models import QuestionNumberCounter
                 old_approved_status = question.is_approved
-                question.is_approved = request.data.get('is_approved')
-                question.save(update_fields=['is_approved'])
+                new_approved_status = request.data.get('is_approved')
+                
+                # If transitioning to approved and question_number is NULL, assign it atomically
+                if new_approved_status and not old_approved_status and question.question_number is None:
+                    question.question_number = QuestionNumberCounter.allocate_next_number()
+                elif not new_approved_status and old_approved_status:
+                    # If unapproving, set question_number to NULL
+                    question.question_number = None
+                
+                question.is_approved = new_approved_status
+                update_fields = ['is_approved']
+                if question.question_number is None or (new_approved_status and not old_approved_status):
+                    update_fields.append('question_number')
+                question.save(update_fields=update_fields)
                 
                 # Invalidate metadata cache if approval status actually changed
                 if old_approved_status != question.is_approved:
                     cache.delete('questions_metadata_v2')
-                    logger.info(f"Question approval toggled via PATCH: {question.id}, is_approved={question.is_approved}, cache invalidated")
+                    logger.info(f"Question approval toggled via PATCH: {question.id}, is_approved={question.is_approved}, question_number={question.question_number}, cache invalidated")
                 else:
                     logger.info(f"Question approval unchanged via PATCH: {question.id}, is_approved={question.is_approved}")
                 
@@ -966,7 +985,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
             # Extract data from request
             text = request.data.get('text', '').strip()
             question_name = request.data.get('question_name', '').strip()
-            question_number = request.data.get('question_number')
+            # question_number is NOT accepted from client - assigned only on approval
             group_number = request.data.get('group_number')
             group_name = request.data.get('group_name', '').strip()
             group_name_text = request.data.get('group_name_text', '').strip()
@@ -999,10 +1018,11 @@ class QuestionViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             # Update the question
+            # question_number is NOT updated from client - only assigned on approval transition
             question_data = {
                 'text': text,
                 'question_name': question_name,
-                'question_number': question_number,
+                # question_number is NOT updated from client - preserve existing or assign on approval
                 'group_number': group_number,
                 'group_name': group_name,
                 'group_name_text': group_name_text,
@@ -1019,7 +1039,18 @@ class QuestionViewSet(viewsets.ModelViewSet):
             
             # Check if approval status is changing
             from django.core.cache import cache
+            from .models import QuestionNumberCounter
             old_approved_status = question.is_approved
+            
+            # If transitioning to approved and question_number is NULL, assign it atomically
+            if is_approved and not old_approved_status and question.question_number is None:
+                question_data['question_number'] = QuestionNumberCounter.allocate_next_number()
+            elif not is_approved and old_approved_status:
+                # If unapproving, set question_number to NULL
+                question_data['question_number'] = None
+            else:
+                # Preserve existing question_number
+                question_data['question_number'] = question.question_number
             
             serializer = self.get_serializer(question, data=question_data, partial=True)
             serializer.is_valid(raise_exception=True)
@@ -1070,10 +1101,16 @@ class QuestionViewSet(viewsets.ModelViewSet):
     def approve(self, request, pk=None):
         """Approve a question (admin only)"""
         from django.core.cache import cache
+        from .models import QuestionNumberCounter
         try:
             question = self.get_object()
+            
+            # Assign question_number atomically if not already assigned
+            if question.question_number is None:
+                question.question_number = QuestionNumberCounter.allocate_next_number()
+            
             question.is_approved = True
-            question.save()
+            question.save(update_fields=['is_approved', 'question_number'])
 
             # Invalidate metadata cache when approval status changes
             cache_key = 'questions_metadata_v2'
@@ -1095,11 +1132,13 @@ class QuestionViewSet(viewsets.ModelViewSet):
         try:
             question = self.get_object()
             question.is_approved = False
-            question.save()
+            # Set question_number to NULL when unapproving
+            question.question_number = None
+            question.save(update_fields=['is_approved', 'question_number'])
 
             # Invalidate metadata cache when approval status changes
             cache.delete('questions_metadata_v2')
-            logger.info(f"Question rejected: {question.id}, cache invalidated")
+            logger.info(f"Question rejected: {question.id}, question_number set to NULL, cache invalidated")
 
             serializer = self.get_serializer(question)
             return Response(serializer.data)
@@ -1113,14 +1152,25 @@ class QuestionViewSet(viewsets.ModelViewSet):
     def toggle_approval(self, request, pk=None):
         """Toggle question approval status"""
         from django.core.cache import cache
+        from .models import QuestionNumberCounter
         try:
             question = self.get_object()
-            question.is_approved = not question.is_approved
-            question.save(update_fields=['is_approved'])
+            old_approved = question.is_approved
+            new_approved = not old_approved
+            
+            # If transitioning to approved and question_number is NULL, assign it atomically
+            if new_approved and question.question_number is None:
+                question.question_number = QuestionNumberCounter.allocate_next_number()
+            elif not new_approved:
+                # If unapproving, set question_number to NULL
+                question.question_number = None
+            
+            question.is_approved = new_approved
+            question.save(update_fields=['is_approved', 'question_number'])
 
             # Invalidate metadata cache when approval status changes
             cache.delete('questions_metadata_v2')
-            logger.info(f"Question approval toggled: {question.id}, is_approved={question.is_approved}, cache invalidated")
+            logger.info(f"Question approval toggled: {question.id}, is_approved={question.is_approved}, question_number={question.question_number}, cache invalidated")
 
             serializer = self.get_serializer(question)
             return Response(serializer.data)
