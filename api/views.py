@@ -204,11 +204,12 @@ class UserViewSet(viewsets.ModelViewSet):
         elif not request.user.is_authenticated:
             return Response({'error': 'Authentication required'}, status=401)
 
-        # Get filter parameters
+            # Get filter parameters
         compatibility_type = request.query_params.get('compatibility_type', 'overall_compatibility')
         min_compatibility = float(request.query_params.get('min_compatibility', 0))
         max_compatibility = float(request.query_params.get('max_compatibility', 100))
         required_only = request.query_params.get('required_only', 'false').lower() == 'true'
+        sort_by = request.query_params.get('sort', 'overall_compatibility')  # New: support sorting by required
         
         # Get age and distance filter parameters
         min_age = request.query_params.get('min_age')
@@ -252,29 +253,54 @@ class UserViewSet(viewsets.ModelViewSet):
                 'overall_compatibility': 'overall_compatibility',
                 'compatible_with_me': 'compatible_with_me',
                 'im_compatible_with': 'im_compatible_with',
+                'required_overall_compatibility': 'required_overall_compatibility',
+                'required_compatible_with_me': 'required_compatible_with_me',
+                'required_im_compatible_with': 'required_im_compatible_with',
             }.get(compatibility_type, 'overall_compatibility')
 
             apply_required_filter = required_only
 
-            # Use pre-calculated compatibilities for instant ranking of ALL users
-            if compatibility_type == 'compatible_with_me':
-                compatibility_score_expression = Case(
-                    When(user1=request.user, then='compatible_with_me'),
-                    default='im_compatible_with',
-                    output_field=FloatField()
-                )
-            elif compatibility_type == 'im_compatible_with':
-                compatibility_score_expression = Case(
-                    When(user1=request.user, then='im_compatible_with'),
-                    default='compatible_with_me',
-                    output_field=FloatField()
-                )
+            # Determine which field to use for sorting
+            if sort_by.startswith('required_'):
+                # Sorting by required compatibility
+                if sort_by == 'required_compatible_with_me':
+                    compatibility_score_expression = Case(
+                        When(user1=request.user, then='required_compatible_with_me'),
+                        default='required_im_compatible_with',
+                        output_field=FloatField()
+                    )
+                elif sort_by == 'required_im_compatible_with':
+                    compatibility_score_expression = Case(
+                        When(user1=request.user, then='required_im_compatible_with'),
+                        default='required_compatible_with_me',
+                        output_field=FloatField()
+                    )
+                else:  # required_overall_compatibility
+                    compatibility_score_expression = Case(
+                        When(user1=request.user, then='required_overall_compatibility'),
+                        default='required_overall_compatibility',
+                        output_field=FloatField()
+                    )
             else:
-                compatibility_score_expression = Case(
-                    When(user1=request.user, then='overall_compatibility'),
-                    default='overall_compatibility',
-                    output_field=FloatField()
-                )
+                # Use pre-calculated compatibilities for instant ranking of ALL users
+                if compatibility_type == 'compatible_with_me':
+                    compatibility_score_expression = Case(
+                        When(user1=request.user, then='compatible_with_me'),
+                        default='im_compatible_with',
+                        output_field=FloatField()
+                    )
+                elif compatibility_type == 'im_compatible_with':
+                    compatibility_score_expression = Case(
+                        When(user1=request.user, then='im_compatible_with'),
+                        default='compatible_with_me',
+                        output_field=FloatField()
+                    )
+                else:
+                    compatibility_score_expression = Case(
+                        When(user1=request.user, then='overall_compatibility'),
+                        default='overall_compatibility',
+                        output_field=FloatField()
+                    )
 
             compatibilities = Compatibility.objects.filter(
                 Q(user1=request.user) | Q(user2=request.user)
@@ -579,13 +605,19 @@ class UserViewSet(viewsets.ModelViewSet):
                     continue
 
                 user_serializer = SimpleUserSerializer(other_user)
+                is_user1 = comp.user1 == request.user
                 response_data.append({
                     'user': user_serializer.data,
                     'compatibility': {
                         'overall_compatibility': comp.overall_compatibility,
-                        'compatible_with_me': comp.compatible_with_me if comp.user1 == request.user else comp.im_compatible_with,
-                        'im_compatible_with': comp.im_compatible_with if comp.user1 == request.user else comp.compatible_with_me,
-                        'mutual_questions_count': comp.mutual_questions_count
+                        'compatible_with_me': comp.compatible_with_me if is_user1 else comp.im_compatible_with,
+                        'im_compatible_with': comp.im_compatible_with if is_user1 else comp.compatible_with_me,
+                        'mutual_questions_count': comp.mutual_questions_count,
+                        'required_overall_compatibility': comp.required_overall_compatibility,
+                        'required_compatible_with_me': comp.required_compatible_with_me if is_user1 else comp.required_im_compatible_with,
+                        'required_im_compatible_with': comp.required_im_compatible_with if is_user1 else comp.required_compatible_with_me,
+                        'required_mutual_questions_count': comp.required_mutual_questions_count,
+                        'required_completeness_ratio': comp.required_completeness_ratio,
                     }
                 })
 

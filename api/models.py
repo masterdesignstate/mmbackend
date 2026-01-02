@@ -189,6 +189,14 @@ class Compatibility(models.Model):
     im_compatible_with = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     
     mutual_questions_count = models.PositiveIntegerField(default=0)
+    
+    # Required compatibility fields
+    required_overall_compatibility = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    required_compatible_with_me = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    required_im_compatible_with = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    required_mutual_questions_count = models.PositiveIntegerField(default=0)
+    required_completeness_ratio = models.DecimalField(max_digits=4, decimal_places=3, default=0)
+    
     last_calculated = models.DateTimeField(auto_now=True)
     
     class Meta:

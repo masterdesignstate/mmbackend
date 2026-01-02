@@ -136,10 +136,20 @@ class CompatibilitySerializer(serializers.ModelSerializer):
         fields = [
             'id', 'user1', 'user2', 'overall_compatibility', 
             'compatible_with_me', 'im_compatible_with', 
-            'mutual_questions_count', 'last_calculated'
+            'mutual_questions_count', 
+            'required_overall_compatibility', 'required_compatible_with_me',
+            'required_im_compatible_with', 'required_mutual_questions_count',
+            'required_completeness_ratio',
+            'last_calculated'
         ]
-        read_only_fields = ['id', 'overall_compatibility', 'compatible_with_me', 
-                           'im_compatible_with', 'mutual_questions_count', 'last_calculated']
+        read_only_fields = [
+            'id', 'overall_compatibility', 'compatible_with_me', 
+            'im_compatible_with', 'mutual_questions_count',
+            'required_overall_compatibility', 'required_compatible_with_me',
+            'required_im_compatible_with', 'required_mutual_questions_count',
+            'required_completeness_ratio',
+            'last_calculated'
+        ]
 
 
 class UserResultSerializer(serializers.ModelSerializer):
