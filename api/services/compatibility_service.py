@@ -284,12 +284,6 @@ class CompatibilityService:
                 if qid in required_question_ids
             }
 
-            # Compute completeness ratio (penalty multiplier)
-            user1_required_answered = len(a1_req)
-            user2_required_answered = len(a2_req)
-            combined_completeness = min(user1_required_answered, user2_required_answered) / total_required_count
-            combined_completeness = max(0.0, min(1.0, combined_completeness))  # Clamp 0-1
-
             # Find mutual required questions
             mutual_req_ids = set(a1_req.keys()) & set(a2_req.keys())
             required_mutual_count = len(mutual_req_ids)
@@ -301,22 +295,24 @@ class CompatibilityService:
                     'required_compatible_with_me': 0.0,
                     'required_im_compatible_with': 0.0,
                     'required_mutual_questions_count': 0,
-                    'required_completeness_ratio': round(combined_completeness, 3),
+                    'required_completeness_ratio': 0.0,
                 })
             else:
-                # Calculate base required compatibility on mutual required questions
-                base_req_compatible_with_me, base_req_im_compatible_with, base_req_overall, _ = \
+                # Calculate required compatibility on mutual required questions only
+                # No penalty multiplier - just the base score
+                required_compatible_with_me, required_im_compatible_with, required_overall, _ = \
                     CompatibilityService._compute_scores_from_answer_maps(a1_req, a2_req, constants)
 
-                # Apply completeness penalty multiplier
-                required_compatible_with_me = round(base_req_compatible_with_me * combined_completeness, 2)
-                required_im_compatible_with = round(base_req_im_compatible_with * combined_completeness, 2)
-                required_overall = round(base_req_overall * combined_completeness, 2)
+                # Calculate completeness ratio for sorting purposes (not used as penalty)
+                user1_required_answered = len(a1_req)
+                user2_required_answered = len(a2_req)
+                combined_completeness = min(user1_required_answered, user2_required_answered) / total_required_count
+                combined_completeness = max(0.0, min(1.0, combined_completeness))  # Clamp 0-1
 
                 result.update({
-                    'required_overall_compatibility': required_overall,
-                    'required_compatible_with_me': required_compatible_with_me,
-                    'required_im_compatible_with': required_im_compatible_with,
+                    'required_overall_compatibility': round(required_overall, 2),
+                    'required_compatible_with_me': round(required_compatible_with_me, 2),
+                    'required_im_compatible_with': round(required_im_compatible_with, 2),
                     'required_mutual_questions_count': required_mutual_count,
                     'required_completeness_ratio': round(combined_completeness, 3),
                 })
