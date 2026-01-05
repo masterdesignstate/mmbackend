@@ -295,6 +295,8 @@ class CompatibilityService:
                     'required_compatible_with_me': 0.0,
                     'required_im_compatible_with': 0.0,
                     'required_mutual_questions_count': 0,
+                    'user1_required_completeness': 0.0,
+                    'user2_required_completeness': 0.0,
                     'required_completeness_ratio': 0.0,
                 })
             else:
@@ -303,18 +305,33 @@ class CompatibilityService:
                 required_compatible_with_me, required_im_compatible_with, required_overall, _ = \
                     CompatibilityService._compute_scores_from_answer_maps(a1_req, a2_req, constants)
 
-                # Calculate completeness ratio for sorting purposes (not used as penalty)
+                # Calculate directional completeness ratios
+                # user1_required_completeness: Of user2's answered required questions, what % did user1 also answer?
+                # user2_required_completeness: Of user1's answered required questions, what % did user2 also answer?
                 user1_required_answered = len(a1_req)
                 user2_required_answered = len(a2_req)
-                combined_completeness = min(user1_required_answered, user2_required_answered) / total_required_count
-                combined_completeness = max(0.0, min(1.0, combined_completeness))  # Clamp 0-1
+
+                # From user1's perspective: of user2's answered required questions, how many did user1 answer?
+                user1_completeness = (required_mutual_count / user2_required_answered) if user2_required_answered > 0 else 0.0
+
+                # From user2's perspective: of user1's answered required questions, how many did user2 answer?
+                user2_completeness = (required_mutual_count / user1_required_answered) if user1_required_answered > 0 else 0.0
+
+                # Clamp 0-1
+                user1_completeness = max(0.0, min(1.0, user1_completeness))
+                user2_completeness = max(0.0, min(1.0, user2_completeness))
+
+                # Combined (average) for backward compatibility
+                combined_completeness = (user1_completeness + user2_completeness) / 2
 
                 result.update({
                     'required_overall_compatibility': round(required_overall, 2),
                     'required_compatible_with_me': round(required_compatible_with_me, 2),
                     'required_im_compatible_with': round(required_im_compatible_with, 2),
                     'required_mutual_questions_count': required_mutual_count,
-                    'required_completeness_ratio': round(combined_completeness, 3),
+                    'user1_required_completeness': round(user1_completeness, 3),
+                    'user2_required_completeness': round(user2_completeness, 3),
+                    'required_completeness_ratio': round(combined_completeness, 3),  # Deprecated
                 })
 
         # Cache the result for 1 hour
@@ -477,6 +494,8 @@ class CompatibilityService:
                 comp.required_compatible_with_me = compatibility_data['required_compatible_with_me']
                 comp.required_im_compatible_with = compatibility_data['required_im_compatible_with']
                 comp.required_mutual_questions_count = compatibility_data['required_mutual_questions_count']
+                comp.user1_required_completeness = compatibility_data['user1_required_completeness']
+                comp.user2_required_completeness = compatibility_data['user2_required_completeness']
                 comp.required_completeness_ratio = compatibility_data['required_completeness_ratio']
                 updates.append(comp)
             elif key_reverse in existing_map:
@@ -491,6 +510,9 @@ class CompatibilityService:
                 comp.required_compatible_with_me = compatibility_data['required_im_compatible_with']
                 comp.required_im_compatible_with = compatibility_data['required_compatible_with_me']
                 comp.required_mutual_questions_count = compatibility_data['required_mutual_questions_count']
+                # Completeness ratios also swap
+                comp.user1_required_completeness = compatibility_data['user2_required_completeness']
+                comp.user2_required_completeness = compatibility_data['user1_required_completeness']
                 comp.required_completeness_ratio = compatibility_data['required_completeness_ratio']
                 reverse_updates.append(comp)
             else:
@@ -506,6 +528,8 @@ class CompatibilityService:
                         required_compatible_with_me=compatibility_data['required_compatible_with_me'],
                         required_im_compatible_with=compatibility_data['required_im_compatible_with'],
                         required_mutual_questions_count=compatibility_data['required_mutual_questions_count'],
+                        user1_required_completeness=compatibility_data['user1_required_completeness'],
+                        user2_required_completeness=compatibility_data['user2_required_completeness'],
                         required_completeness_ratio=compatibility_data['required_completeness_ratio'],
                     )
                 )
@@ -520,6 +544,8 @@ class CompatibilityService:
             'required_compatible_with_me',
             'required_im_compatible_with',
             'required_mutual_questions_count',
+            'user1_required_completeness',
+            'user2_required_completeness',
             'required_completeness_ratio',
         ]
 

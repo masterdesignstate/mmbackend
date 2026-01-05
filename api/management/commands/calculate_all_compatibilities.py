@@ -76,19 +76,82 @@ class Command(BaseCommand):
                             user1, user2
                         )
 
+                        # DEBUG: Log the calculated values for first 3 pairs
+                        if processed_pairs <= 3:
+                            self.stdout.write(f'DEBUG: Calculated compatibility for {user1.username} <-> {user2.username}:')
+                            self.stdout.write(f'  Overall: {compatibility_data.get("overall_compatibility")}')
+                            self.stdout.write(f'  Required Overall: {compatibility_data.get("required_overall_compatibility")}')
+                            self.stdout.write(f'  Required Compatible with Me: {compatibility_data.get("required_compatible_with_me")}')
+                            self.stdout.write(f'  Required I\'m Compatible with: {compatibility_data.get("required_im_compatible_with")}')
+                            self.stdout.write(f'  Required Mutual Count: {compatibility_data.get("required_mutual_questions_count")}')
+                            self.stdout.write(f'  Required Completeness Ratio: {compatibility_data.get("required_completeness_ratio")}')
+
                         if existing:
-                            # Update existing record
-                            for key, value in compatibility_data.items():
-                                setattr(existing, key, value)
-                            existing.save()
+                            # Update existing record - explicitly set all fields including required
+                            # Convert to Decimal for DecimalField compatibility
+                            from decimal import Decimal
+                            existing.overall_compatibility = Decimal(str(compatibility_data.get('overall_compatibility', 0)))
+                            existing.compatible_with_me = Decimal(str(compatibility_data.get('compatible_with_me', 0)))
+                            existing.im_compatible_with = Decimal(str(compatibility_data.get('im_compatible_with', 0)))
+                            existing.mutual_questions_count = compatibility_data.get('mutual_questions_count', 0)
+                            existing.required_overall_compatibility = Decimal(str(compatibility_data.get('required_overall_compatibility', 0)))
+                            existing.required_compatible_with_me = Decimal(str(compatibility_data.get('required_compatible_with_me', 0)))
+                            existing.required_im_compatible_with = Decimal(str(compatibility_data.get('required_im_compatible_with', 0)))
+                            existing.required_mutual_questions_count = compatibility_data.get('required_mutual_questions_count', 0)
+                            existing.user1_required_completeness = Decimal(str(compatibility_data.get('user1_required_completeness', 0)))
+                            existing.user2_required_completeness = Decimal(str(compatibility_data.get('user2_required_completeness', 0)))
+                            existing.required_completeness_ratio = Decimal(str(compatibility_data.get('required_completeness_ratio', 0)))
+                            existing.save(update_fields=[
+                                'overall_compatibility', 'compatible_with_me', 'im_compatible_with', 'mutual_questions_count',
+                                'required_overall_compatibility', 'required_compatible_with_me', 'required_im_compatible_with',
+                                'required_mutual_questions_count', 'user1_required_completeness', 'user2_required_completeness',
+                                'required_completeness_ratio'
+                            ])
+
+                            # DEBUG: Verify what was saved for first 3 pairs
+                            if processed_pairs <= 3:
+                                existing.refresh_from_db()
+                                self.stdout.write(f'DEBUG: After save, database shows:')
+                                self.stdout.write(f'  Overall: {existing.overall_compatibility}')
+                                self.stdout.write(f'  Required Overall: {existing.required_overall_compatibility}')
+                                self.stdout.write(f'  Required Compatible with Me: {existing.required_compatible_with_me}')
+                                self.stdout.write(f'  Required I\'m Compatible with: {existing.required_im_compatible_with}')
+                                self.stdout.write(f'  Required Mutual Count: {existing.required_mutual_questions_count}')
+                                self.stdout.write(f'  Required Completeness Ratio: {existing.required_completeness_ratio}')
+                                self.stdout.write('─' * 50)
+
                             updated_pairs += 1
                         else:
-                            # Create new record
-                            Compatibility.objects.create(
+                            # Create new record - convert to Decimal for DecimalField compatibility
+                            from decimal import Decimal
+                            new_comp = Compatibility.objects.create(
                                 user1=user1,
                                 user2=user2,
-                                **compatibility_data
+                                overall_compatibility=Decimal(str(compatibility_data.get('overall_compatibility', 0))),
+                                compatible_with_me=Decimal(str(compatibility_data.get('compatible_with_me', 0))),
+                                im_compatible_with=Decimal(str(compatibility_data.get('im_compatible_with', 0))),
+                                mutual_questions_count=compatibility_data.get('mutual_questions_count', 0),
+                                required_overall_compatibility=Decimal(str(compatibility_data.get('required_overall_compatibility', 0))),
+                                required_compatible_with_me=Decimal(str(compatibility_data.get('required_compatible_with_me', 0))),
+                                required_im_compatible_with=Decimal(str(compatibility_data.get('required_im_compatible_with', 0))),
+                                required_mutual_questions_count=compatibility_data.get('required_mutual_questions_count', 0),
+                                user1_required_completeness=Decimal(str(compatibility_data.get('user1_required_completeness', 0))),
+                                user2_required_completeness=Decimal(str(compatibility_data.get('user2_required_completeness', 0))),
+                                required_completeness_ratio=Decimal(str(compatibility_data.get('required_completeness_ratio', 0))),
                             )
+
+                            # DEBUG: Verify what was created for first 3 pairs
+                            if processed_pairs <= 3:
+                                new_comp.refresh_from_db()
+                                self.stdout.write(f'DEBUG: Created new compatibility, database shows:')
+                                self.stdout.write(f'  Overall: {new_comp.overall_compatibility}')
+                                self.stdout.write(f'  Required Overall: {new_comp.required_overall_compatibility}')
+                                self.stdout.write(f'  Required Compatible with Me: {new_comp.required_compatible_with_me}')
+                                self.stdout.write(f'  Required I\'m Compatible with: {new_comp.required_im_compatible_with}')
+                                self.stdout.write(f'  Required Mutual Count: {new_comp.required_mutual_questions_count}')
+                                self.stdout.write(f'  Required Completeness Ratio: {new_comp.required_completeness_ratio}')
+                                self.stdout.write('─' * 50)
+
                             created_pairs += 1
 
                         # Progress update every 100 pairs
