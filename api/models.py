@@ -195,6 +195,18 @@ class Compatibility(models.Model):
     required_compatible_with_me = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     required_im_compatible_with = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     required_mutual_questions_count = models.PositiveIntegerField(default=0)
+
+    # Directional completeness ratios (what % of their required questions have I answered?)
+    user1_required_completeness = models.DecimalField(
+        max_digits=4, decimal_places=3, default=0,
+        help_text="Of user2's answered required questions, what % did user1 also answer?"
+    )
+    user2_required_completeness = models.DecimalField(
+        max_digits=4, decimal_places=3, default=0,
+        help_text="Of user1's answered required questions, what % did user2 also answer?"
+    )
+
+    # DEPRECATED: Use user1_required_completeness and user2_required_completeness instead
     required_completeness_ratio = models.DecimalField(max_digits=4, decimal_places=3, default=0)
     
     last_calculated = models.DateTimeField(auto_now=True)

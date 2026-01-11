@@ -245,7 +245,8 @@ class UserViewSet(viewsets.ModelViewSet):
         logger.info(f"Pagination: page={page}, size={page_size}, offset={offset}")
 
         try:
-            from django.db.models import Q, Case, When, FloatField
+            from django.db.models import Q, Case, When, FloatField, BooleanField
+            from django.db import models
             from .models import Compatibility
             from .serializers import SimpleUserSerializer
 
@@ -302,16 +303,46 @@ class UserViewSet(viewsets.ModelViewSet):
                         output_field=FloatField()
                     )
 
-            compatibilities = Compatibility.objects.filter(
-                Q(user1=request.user) | Q(user2=request.user)
-            ).select_related('user1', 'user2').annotate(
-                # Determine which user is the "other" user and get the right compatibility score
-                other_user_id=Case(
-                    When(user1=request.user, then='user2__id'),
-                    default='user1__id'
-                ),
-                compatibility_score=compatibility_score_expression
-            ).order_by('-compatibility_score')
+            # When required_only is enabled, we need to sort by completeness first, then by required compatibility
+            if apply_required_filter and sort_by.startswith('required_'):
+                # Sort by completeness (1.0 = complete, < 1.0 = incomplete), then by required compatibility score
+                # Completeness measures: Of MY required questions, what % did THEY answer?
+                # When I'm user1: use user2_required_completeness
+                # When I'm user2: use user1_required_completeness
+                compatibilities = Compatibility.objects.filter(
+                    Q(user1=request.user) | Q(user2=request.user)
+                ).select_related('user1', 'user2').annotate(
+                    other_user_id=Case(
+                        When(user1=request.user, then='user2__id'),
+                        default='user1__id'
+                    ),
+                    compatibility_score=compatibility_score_expression,
+                    # Get the completeness from the correct direction
+                    # This is: what % of MY required questions did THEY answer?
+                    their_completeness=Case(
+                        When(user1=request.user, then='user2_required_completeness'),
+                        default='user1_required_completeness',
+                        output_field=FloatField()
+                    )
+                ).order_by('-their_completeness', '-compatibility_score')
+            else:
+                compatibilities = Compatibility.objects.filter(
+                    Q(user1=request.user) | Q(user2=request.user)
+                ).select_related('user1', 'user2').annotate(
+                    # Determine which user is the "other" user and get the right compatibility score
+                    other_user_id=Case(
+                        When(user1=request.user, then='user2__id'),
+                        default='user1__id'
+                    ),
+                    compatibility_score=compatibility_score_expression,
+                    # Get the completeness from the correct direction
+                    # This is: what % of MY required questions did THEY answer?
+                    their_completeness=Case(
+                        When(user1=request.user, then='user2_required_completeness'),
+                        default='user1_required_completeness',
+                        output_field=FloatField()
+                    )
+                ).order_by('-their_completeness', '-compatibility_score')
 
             # Apply compatibility filters based on selected compatibility type
             if not apply_required_filter:
@@ -617,6 +648,8 @@ class UserViewSet(viewsets.ModelViewSet):
                         'required_compatible_with_me': comp.required_compatible_with_me if is_user1 else comp.required_im_compatible_with,
                         'required_im_compatible_with': comp.required_im_compatible_with if is_user1 else comp.required_compatible_with_me,
                         'required_mutual_questions_count': comp.required_mutual_questions_count,
+                        'user1_required_completeness': comp.user1_required_completeness if is_user1 else comp.user2_required_completeness,
+                        'user2_required_completeness': comp.user2_required_completeness if is_user1 else comp.user1_required_completeness,
                         'required_completeness_ratio': comp.required_completeness_ratio,
                     }
                 })
