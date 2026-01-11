@@ -306,7 +306,9 @@ class UserViewSet(viewsets.ModelViewSet):
             # When required_only is enabled, we need to sort by completeness first, then by required compatibility
             if apply_required_filter and sort_by.startswith('required_'):
                 # Sort by completeness (1.0 = complete, < 1.0 = incomplete), then by required compatibility score
-                # Users with completeness_ratio = 1.0 (answered all required) come first
+                # Completeness measures: Of MY required questions, what % did THEY answer?
+                # When I'm user1: use user2_required_completeness
+                # When I'm user2: use user1_required_completeness
                 compatibilities = Compatibility.objects.filter(
                     Q(user1=request.user) | Q(user2=request.user)
                 ).select_related('user1', 'user2').annotate(
@@ -315,13 +317,14 @@ class UserViewSet(viewsets.ModelViewSet):
                         default='user1__id'
                     ),
                     compatibility_score=compatibility_score_expression,
-                    # Add a field to check if user has answered all required (completeness = 1.0)
-                    is_complete=Case(
-                        When(required_completeness_ratio=1.0, then=1),
-                        default=0,
-                        output_field=models.IntegerField()
+                    # Get the completeness from the correct direction
+                    # This is: what % of MY required questions did THEY answer?
+                    their_completeness=Case(
+                        When(user1=request.user, then='user2_required_completeness'),
+                        default='user1_required_completeness',
+                        output_field=FloatField()
                     )
-                ).order_by('-is_complete', '-compatibility_score')
+                ).order_by('-their_completeness', '-compatibility_score')
             else:
                 compatibilities = Compatibility.objects.filter(
                     Q(user1=request.user) | Q(user2=request.user)
@@ -331,8 +334,15 @@ class UserViewSet(viewsets.ModelViewSet):
                         When(user1=request.user, then='user2__id'),
                         default='user1__id'
                     ),
-                    compatibility_score=compatibility_score_expression
-                ).order_by('-compatibility_score')
+                    compatibility_score=compatibility_score_expression,
+                    # Get the completeness from the correct direction
+                    # This is: what % of MY required questions did THEY answer?
+                    their_completeness=Case(
+                        When(user1=request.user, then='user2_required_completeness'),
+                        default='user1_required_completeness',
+                        output_field=FloatField()
+                    )
+                ).order_by('-their_completeness', '-compatibility_score')
 
             # Apply compatibility filters based on selected compatibility type
             if not apply_required_filter:
