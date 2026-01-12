@@ -232,6 +232,11 @@ class UserViewSet(viewsets.ModelViewSet):
         print(f"🔍 Age filters: min={min_age}, max={max_age}")
         print(f"🔍 Distance filters: min={min_distance}, max={max_distance}")
 
+        # Get search parameters
+        search_term = request.query_params.get('search', '').strip()
+        search_field = request.query_params.get('search_field', 'name').strip()
+        print(f"🔍 Search: term='{search_term}', field='{search_field}'")
+
         # Get pagination parameters
         page = int(request.query_params.get('page', 1))
         page_size = int(request.query_params.get('page_size', 15))
@@ -474,6 +479,38 @@ class UserViewSet(viewsets.ModelViewSet):
                         Q(user1__id__in=hidden_user_ids) | Q(user2__id__in=hidden_user_ids)
                     )
                     print(f"🚫 Excluded {len(hidden_user_ids)} hidden users from results")
+
+            # Apply search filters
+            if search_term:
+                search_lower = search_term.lower()
+                if search_field == 'name':
+                    # Filter by first_name (case-insensitive contains)
+                    compatibilities = compatibilities.filter(
+                        Q(user1=request.user, user2__first_name__icontains=search_term) |
+                        Q(user2=request.user, user1__first_name__icontains=search_term)
+                    )
+                    print(f"🔍 Applied name search filter: '{search_term}'")
+                elif search_field == 'username':
+                    # Filter by username (case-insensitive contains)
+                    compatibilities = compatibilities.filter(
+                        Q(user1=request.user, user2__username__icontains=search_term) |
+                        Q(user2=request.user, user1__username__icontains=search_term)
+                    )
+                    print(f"🔍 Applied username search filter: '{search_term}'")
+                elif search_field == 'live':
+                    # Filter by live location (case-insensitive contains)
+                    compatibilities = compatibilities.filter(
+                        Q(user1=request.user, user2__live__icontains=search_term) |
+                        Q(user2=request.user, user1__live__icontains=search_term)
+                    )
+                    print(f"🔍 Applied live location search filter: '{search_term}'")
+                elif search_field == 'bio':
+                    # Filter by bio (case-insensitive contains)
+                    compatibilities = compatibilities.filter(
+                        Q(user1=request.user, user2__bio__icontains=search_term) |
+                        Q(user2=request.user, user1__bio__icontains=search_term)
+                    )
+                    print(f"🔍 Applied bio search filter: '{search_term}'")
 
             if apply_required_filter:
                 compatibility_results = []
