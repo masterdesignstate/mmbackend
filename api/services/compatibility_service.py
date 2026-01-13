@@ -412,21 +412,54 @@ class CompatibilityService:
         return compatible_users[offset:offset + limit]
 
     @staticmethod
+    def clear_user_compatibility_cache(user: User) -> int:
+        """
+        Clear all cached compatibility data involving this user.
+        Returns the number of cache entries cleared.
+        """
+        # Get all other user IDs to clear caches
+        other_user_ids = list(User.objects.exclude(id=user.id).values_list('id', flat=True))
+        cleared = 0
+
+        for other_id in other_user_ids:
+            # Build cache keys for both orderings and all suffixes
+            user_ids = sorted([str(user.id), str(other_id)])
+            base_key = f"compatibility_{user_ids[0]}_{user_ids[1]}"
+
+            for suffix in ['', '_required', '_exclude_required']:
+                cache_key = f"{base_key}{suffix}"
+                if cache.get(cache_key) is not None:
+                    cache.delete(cache_key)
+                    cleared += 1
+
+        return cleared
+
+    @staticmethod
     def recalculate_all_compatibilities(user: User, use_full_reset: bool = True) -> int:
         """
         Recalculate all compatibilities for a user (useful when their answers change)
         Now also computes required compatibility scores.
         Returns the number of compatibilities updated
         """
+        print(f"🔄 Starting compatibility recalculation for user {user.username} ({user.id})", flush=True)
+
+        # Clear cache first to ensure fresh calculations
+        cache_cleared = CompatibilityService.clear_user_compatibility_cache(user)
+        print(f"   🗑️  Cleared {cache_cleared} cached entries", flush=True)
+
         if use_full_reset:
-            Compatibility.objects.filter(
+            deleted_count = Compatibility.objects.filter(
                 Q(user1=user) | Q(user2=user)
-            ).delete()
+            ).delete()[0]
+            print(f"   🗑️  Deleted {deleted_count} existing compatibility records (full reset)", flush=True)
 
         # Get all other users
         other_users = list(User.objects.exclude(id=user.id).exclude(is_banned=True))
         if not other_users:
+            print(f"   ⚠️  No other users found to calculate compatibility with", flush=True)
             return 0
+
+        print(f"   👥 Calculating compatibility with {len(other_users)} other users...", flush=True)
 
         # Compute total_required_count once for optimization
         total_required_count = Question.objects.filter(is_required_for_match=True).count()
@@ -470,8 +503,12 @@ class CompatibilityService:
         updates: list[Compatibility] = []
         reverse_updates: list[Compatibility] = []
         to_create: list[Compatibility] = []
+        total_users = len(other_users)
 
-        for other_user in other_users:
+        for idx, other_user in enumerate(other_users):
+            # Print progress every 25 users or at the end
+            if (idx + 1) % 25 == 0 or idx == total_users - 1:
+                print(f"   📊 Progress: {idx + 1}/{total_users} users processed ({((idx + 1) / total_users * 100):.0f}%)", flush=True)
             other_answers_list = answers_by_user.get(str(other_user.id), [])
             compatibility_data = CompatibilityService.calculate_compatibility_between_users(
                 user,
@@ -551,9 +588,15 @@ class CompatibilityService:
 
         if updates:
             Compatibility.objects.bulk_update(updates, update_fields)
+            print(f"   ✏️  Updated {len(updates)} existing compatibility records", flush=True)
         if reverse_updates:
             Compatibility.objects.bulk_update(reverse_updates, update_fields)
+            print(f"   ✏️  Updated {len(reverse_updates)} reverse compatibility records", flush=True)
         if to_create:
             Compatibility.objects.bulk_create(to_create, ignore_conflicts=True)
+            print(f"   ✨ Created {len(to_create)} new compatibility records", flush=True)
+
+        total_processed = len(updates) + len(reverse_updates) + len(to_create)
+        print(f"✅ Completed compatibility recalculation for {user.username}: {total_processed} total pairs processed", flush=True)
 
         return created_count

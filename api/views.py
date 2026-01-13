@@ -709,6 +709,53 @@ class UserViewSet(viewsets.ModelViewSet):
                 'error': 'Failed to get compatible users'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    @action(detail=False, methods=['get'])
+    def compatibility_with(self, request):
+        """Get compatibility between two specific users"""
+        from django.db.models import Q
+        from .models import Compatibility
+
+        user_id = request.query_params.get('user_id')
+        other_user_id = request.query_params.get('other_user_id')
+
+        if not user_id or not other_user_id:
+            return Response({
+                'error': 'Both user_id and other_user_id are required'
+            }, status=400)
+
+        try:
+            # Find compatibility record between the two users (either direction)
+            compatibility = Compatibility.objects.filter(
+                Q(user1_id=user_id, user2_id=other_user_id) |
+                Q(user1_id=other_user_id, user2_id=user_id)
+            ).first()
+
+            if not compatibility:
+                return Response({
+                    'error': 'No compatibility record found between these users'
+                }, status=404)
+
+            # Determine which user is user1/user2 to return the correct direction
+            is_user1 = str(compatibility.user1_id) == str(user_id)
+
+            return Response({
+                'overall_compatibility': compatibility.overall_compatibility,
+                'compatible_with_me': compatibility.compatible_with_me if is_user1 else compatibility.im_compatible_with,
+                'im_compatible_with': compatibility.im_compatible_with if is_user1 else compatibility.compatible_with_me,
+                'mutual_questions_count': compatibility.mutual_questions_count,
+                'required_overall_compatibility': compatibility.required_overall_compatibility,
+                'required_compatible_with_me': compatibility.required_compatible_with_me if is_user1 else compatibility.required_im_compatible_with,
+                'required_im_compatible_with': compatibility.required_im_compatible_with if is_user1 else compatibility.required_compatible_with_me,
+                'required_mutual_questions_count': compatibility.required_mutual_questions_count,
+                'user1_required_completeness': compatibility.user1_required_completeness if is_user1 else compatibility.user2_required_completeness,
+                'user2_required_completeness': compatibility.user2_required_completeness if is_user1 else compatibility.user1_required_completeness,
+            })
+        except Exception as e:
+            logger.error(f"Error getting compatibility: {e}")
+            return Response({
+                'error': 'Failed to get compatibility data'
+            }, status=500)
+
     @action(detail=False, methods=['post'])
     def change_email(self, request):
         """Change user's email address (requires current password and current email)"""

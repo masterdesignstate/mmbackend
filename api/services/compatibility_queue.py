@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
@@ -7,6 +8,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from ..models import CompatibilityJob, User
+
+logger = logging.getLogger(__name__)
 
 MIN_MATCHABLE_ANSWERS = 10
 
@@ -91,3 +94,57 @@ def should_enqueue_after_answer(
         return (True, False)
 
     return (False, False)
+
+
+def process_user_compatibility_immediately(user: User) -> dict:
+    """
+    Process compatibility recalculation for a single user immediately.
+    This is used when a user updates their answers to provide real-time compatibility updates.
+
+    Returns:
+        dict with 'success', 'pairs_recalculated', and optionally 'error' keys
+    """
+    from .compatibility_service import CompatibilityService
+
+    answer_count = user.answers.count()
+
+    if answer_count < MIN_MATCHABLE_ANSWERS:
+        return {
+            'success': False,
+            'pairs_recalculated': 0,
+            'error': f'User needs at least {MIN_MATCHABLE_ANSWERS} answers (has {answer_count})'
+        }
+
+    if user.is_banned:
+        return {
+            'success': False,
+            'pairs_recalculated': 0,
+            'error': 'User is banned'
+        }
+
+    try:
+        # Recalculate all compatibilities for this user
+        pairs_recalculated = CompatibilityService.recalculate_all_compatibilities(user, use_full_reset=False)
+
+        logger.info(f"✅ Immediately recalculated {pairs_recalculated} compatibility pairs for user {user.username} ({user.id})")
+
+        # Mark any pending job as completed since we just processed it
+        CompatibilityJob.objects.filter(
+            user=user,
+            status=CompatibilityJob.STATUS_PENDING
+        ).update(
+            status=CompatibilityJob.STATUS_COMPLETED,
+            updated_at=timezone.now()
+        )
+
+        return {
+            'success': True,
+            'pairs_recalculated': pairs_recalculated
+        }
+    except Exception as e:
+        logger.error(f"❌ Error recalculating compatibility for user {user.username} ({user.id}): {e}")
+        return {
+            'success': False,
+            'pairs_recalculated': 0,
+            'error': str(e)
+        }
