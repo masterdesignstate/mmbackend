@@ -232,6 +232,11 @@ class UserViewSet(viewsets.ModelViewSet):
         print(f"🔍 Age filters: min={min_age}, max={max_age}")
         print(f"🔍 Distance filters: min={min_distance}, max={max_distance}")
 
+        # Get search parameters
+        search_term = request.query_params.get('search', '').strip()
+        search_field = request.query_params.get('search_field', 'name').strip()
+        print(f"🔍 Search: term='{search_term}', field='{search_field}'")
+
         # Get pagination parameters
         page = int(request.query_params.get('page', 1))
         page_size = int(request.query_params.get('page_size', 15))
@@ -475,6 +480,38 @@ class UserViewSet(viewsets.ModelViewSet):
                     )
                     print(f"🚫 Excluded {len(hidden_user_ids)} hidden users from results")
 
+            # Apply search filters
+            if search_term:
+                search_lower = search_term.lower()
+                if search_field == 'name':
+                    # Filter by first_name (case-insensitive contains)
+                    compatibilities = compatibilities.filter(
+                        Q(user1=request.user, user2__first_name__icontains=search_term) |
+                        Q(user2=request.user, user1__first_name__icontains=search_term)
+                    )
+                    print(f"🔍 Applied name search filter: '{search_term}'")
+                elif search_field == 'username':
+                    # Filter by username (case-insensitive contains)
+                    compatibilities = compatibilities.filter(
+                        Q(user1=request.user, user2__username__icontains=search_term) |
+                        Q(user2=request.user, user1__username__icontains=search_term)
+                    )
+                    print(f"🔍 Applied username search filter: '{search_term}'")
+                elif search_field == 'live':
+                    # Filter by live location (case-insensitive contains)
+                    compatibilities = compatibilities.filter(
+                        Q(user1=request.user, user2__live__icontains=search_term) |
+                        Q(user2=request.user, user1__live__icontains=search_term)
+                    )
+                    print(f"🔍 Applied live location search filter: '{search_term}'")
+                elif search_field == 'bio':
+                    # Filter by bio (case-insensitive contains)
+                    compatibilities = compatibilities.filter(
+                        Q(user1=request.user, user2__bio__icontains=search_term) |
+                        Q(user2=request.user, user1__bio__icontains=search_term)
+                    )
+                    print(f"🔍 Applied bio search filter: '{search_term}'")
+
             if apply_required_filter:
                 compatibility_results = []
 
@@ -671,6 +708,53 @@ class UserViewSet(viewsets.ModelViewSet):
             return Response({
                 'error': 'Failed to get compatible users'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=False, methods=['get'])
+    def compatibility_with(self, request):
+        """Get compatibility between two specific users"""
+        from django.db.models import Q
+        from .models import Compatibility
+
+        user_id = request.query_params.get('user_id')
+        other_user_id = request.query_params.get('other_user_id')
+
+        if not user_id or not other_user_id:
+            return Response({
+                'error': 'Both user_id and other_user_id are required'
+            }, status=400)
+
+        try:
+            # Find compatibility record between the two users (either direction)
+            compatibility = Compatibility.objects.filter(
+                Q(user1_id=user_id, user2_id=other_user_id) |
+                Q(user1_id=other_user_id, user2_id=user_id)
+            ).first()
+
+            if not compatibility:
+                return Response({
+                    'error': 'No compatibility record found between these users'
+                }, status=404)
+
+            # Determine which user is user1/user2 to return the correct direction
+            is_user1 = str(compatibility.user1_id) == str(user_id)
+
+            return Response({
+                'overall_compatibility': compatibility.overall_compatibility,
+                'compatible_with_me': compatibility.compatible_with_me if is_user1 else compatibility.im_compatible_with,
+                'im_compatible_with': compatibility.im_compatible_with if is_user1 else compatibility.compatible_with_me,
+                'mutual_questions_count': compatibility.mutual_questions_count,
+                'required_overall_compatibility': compatibility.required_overall_compatibility,
+                'required_compatible_with_me': compatibility.required_compatible_with_me if is_user1 else compatibility.required_im_compatible_with,
+                'required_im_compatible_with': compatibility.required_im_compatible_with if is_user1 else compatibility.required_compatible_with_me,
+                'required_mutual_questions_count': compatibility.required_mutual_questions_count,
+                'user1_required_completeness': compatibility.user1_required_completeness if is_user1 else compatibility.user2_required_completeness,
+                'user2_required_completeness': compatibility.user2_required_completeness if is_user1 else compatibility.user1_required_completeness,
+            })
+        except Exception as e:
+            logger.error(f"Error getting compatibility: {e}")
+            return Response({
+                'error': 'Failed to get compatibility data'
+            }, status=500)
 
     @action(detail=False, methods=['post'])
     def change_email(self, request):
