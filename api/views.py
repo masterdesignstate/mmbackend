@@ -738,6 +738,17 @@ class UserViewSet(viewsets.ModelViewSet):
             # Determine which user is user1/user2 to return the correct direction
             is_user1 = str(compatibility.user1_id) == str(user_id)
 
+            # For completeness ratios (after recalculation):
+            # - user1_required_completeness = mutual / user2_answered = "what % of user2's questions did user1 answer?"
+            # - user2_required_completeness = mutual / user1_answered = "what % of user1's questions did user2 answer?"
+            #
+            # For display:
+            # - "My Required" = "what % of THEIR questions did I answer?"
+            # - "Their Required" = "what % of MY questions did they answer?"
+            #
+            # When current_user is user1: My Required = user1 (no swap), Their Required = user2 (no swap)
+            # When current_user is user2: My Required = user2 (swap), Their Required = user1 (swap)
+
             return Response({
                 'overall_compatibility': compatibility.overall_compatibility,
                 'compatible_with_me': compatibility.compatible_with_me if is_user1 else compatibility.im_compatible_with,
@@ -747,6 +758,7 @@ class UserViewSet(viewsets.ModelViewSet):
                 'required_compatible_with_me': compatibility.required_compatible_with_me if is_user1 else compatibility.required_im_compatible_with,
                 'required_im_compatible_with': compatibility.required_im_compatible_with if is_user1 else compatibility.required_compatible_with_me,
                 'required_mutual_questions_count': compatibility.required_mutual_questions_count,
+                # Swap completeness when current user is user2, pass through when user1
                 'user1_required_completeness': compatibility.user1_required_completeness if is_user1 else compatibility.user2_required_completeness,
                 'user2_required_completeness': compatibility.user2_required_completeness if is_user1 else compatibility.user1_required_completeness,
             })
