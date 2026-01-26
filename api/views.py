@@ -363,6 +363,8 @@ class UserViewSet(viewsets.ModelViewSet):
                 
                 # Get user IDs that match the tag criteria
                 tag_filtered_user_ids = set()
+                not_approved_exclude_ids = set()
+                has_not_approved_tag = False
                 
                 for tag in tags:
                     tag_lower = tag.lower()
@@ -420,6 +422,34 @@ class UserViewSet(viewsets.ModelViewSet):
                         tag_filtered_user_ids.update(hidden_user_ids)
                         print(f"🔍 Found {len(hidden_user_ids)} hidden users")
                         
+                    elif tag_lower == 'approved me':
+                        # Users who have approved me (tagged me as approve)
+                        approved_me_user_ids = UserResult.objects.filter(
+                            result_user=request.user,
+                            tag='approve'
+                        ).values_list('user_id', flat=True)
+                        tag_filtered_user_ids.update(approved_me_user_ids)
+                        print(f"🔍 Found {len(approved_me_user_ids)} users who approved me")
+                        
+                    elif tag_lower == 'liked me':
+                        # Users who have liked me (tagged me as like)
+                        liked_me_user_ids = UserResult.objects.filter(
+                            result_user=request.user,
+                            tag='like'
+                        ).values_list('user_id', flat=True)
+                        tag_filtered_user_ids.update(liked_me_user_ids)
+                        print(f"🔍 Found {len(liked_me_user_ids)} users who liked me")
+                        
+                    elif tag_lower == 'not approved':
+                        # Users I have NOT approved (exclude users I've tagged as approve)
+                        has_not_approved_tag = True
+                        approved_by_me_user_ids = UserResult.objects.filter(
+                            user=request.user,
+                            tag='approve'
+                        ).values_list('result_user_id', flat=True)
+                        not_approved_exclude_ids = set(approved_by_me_user_ids)
+                        print(f"🔍 Will exclude {len(not_approved_exclude_ids)} users I have approved")
+                        
                     else:
                         # Handle other tags
                         other_tag_user_ids = UserResult.objects.filter(
@@ -429,6 +459,14 @@ class UserViewSet(viewsets.ModelViewSet):
                         tag_filtered_user_ids.update(other_tag_user_ids)
                         print(f"🔍 Found {len(other_tag_user_ids)} users with tag '{tag_lower}'")
                 
+                # Handle "Not Approved" tag - exclude approved users from compatibilities
+                if has_not_approved_tag and not_approved_exclude_ids:
+                    compatibilities = compatibilities.exclude(
+                        Q(user1=request.user, user2__id__in=not_approved_exclude_ids) |
+                        Q(user2=request.user, user1__id__in=not_approved_exclude_ids)
+                    )
+                    print(f"🔍 After excluding approved users: {compatibilities.count()} compatibilities remain")
+                
                 # Filter compatibilities to only include users that match tag criteria
                 if tag_filtered_user_ids:
                     print(f"🔍 Tag filtered user IDs: {list(tag_filtered_user_ids)}")
@@ -436,6 +474,9 @@ class UserViewSet(viewsets.ModelViewSet):
                         Q(user1__id__in=tag_filtered_user_ids) | Q(user2__id__in=tag_filtered_user_ids)
                     )
                     print(f"🔍 After tag filtering: {compatibilities.count()} compatibilities remain")
+                elif has_not_approved_tag:
+                    # If only "Not Approved" tag is selected, we've already filtered by exclusion
+                    print(f"🔍 Only 'Not Approved' tag selected, using exclusion filter")
                 else:
                     print(f"🔍 No users match tag criteria, returning empty result")
                     return Response({
@@ -738,16 +779,16 @@ class UserViewSet(viewsets.ModelViewSet):
             # Determine which user is user1/user2 to return the correct direction
             is_user1 = str(compatibility.user1_id) == str(user_id)
 
-            # For completeness ratios (after recalculation):
+            # For completeness ratios (in DB):
             # - user1_required_completeness = mutual / user2_answered = "what % of user2's questions did user1 answer?"
             # - user2_required_completeness = mutual / user1_answered = "what % of user1's questions did user2 answer?"
             #
             # For display:
-            # - "My Required" = "what % of THEIR questions did I answer?"
-            # - "Their Required" = "what % of MY questions did they answer?"
+            # - "My Required" = "what % of MY questions did THEY answer?" (their completeness on my questions)
+            # - "Their Required" = "what % of THEIR questions did I answer?" (my completeness on their questions)
             #
-            # When current_user is user1: My Required = user1 (no swap), Their Required = user2 (no swap)
-            # When current_user is user2: My Required = user2 (swap), Their Required = user1 (swap)
+            # When current_user is user1: My Required = user2_completeness, Their Required = user1_completeness
+            # When current_user is user2: My Required = user1_completeness, Their Required = user2_completeness
 
             return Response({
                 'overall_compatibility': compatibility.overall_compatibility,
@@ -758,9 +799,13 @@ class UserViewSet(viewsets.ModelViewSet):
                 'required_compatible_with_me': compatibility.required_compatible_with_me if is_user1 else compatibility.required_im_compatible_with,
                 'required_im_compatible_with': compatibility.required_im_compatible_with if is_user1 else compatibility.required_compatible_with_me,
                 'required_mutual_questions_count': compatibility.required_mutual_questions_count,
-                # Swap completeness when current user is user2, pass through when user1
-                'user1_required_completeness': compatibility.user1_required_completeness if is_user1 else compatibility.user2_required_completeness,
-                'user2_required_completeness': compatibility.user2_required_completeness if is_user1 else compatibility.user1_required_completeness,
+                # "My Required" = their completeness on MY questions (how many of my Qs did they answer?)
+                # "Their Required" = my completeness on THEIR questions (how many of their Qs did I answer?)
+                # user1_required_completeness in DB = "of user2's Qs, what % did user1 answer"
+                # user2_required_completeness in DB = "of user1's Qs, what % did user2 answer"
+                # So for display: My Required = user2 (their coverage of my Qs), Their Required = user1 (my coverage of their Qs)
+                'user1_required_completeness': compatibility.user2_required_completeness if is_user1 else compatibility.user1_required_completeness,
+                'user2_required_completeness': compatibility.user1_required_completeness if is_user1 else compatibility.user2_required_completeness,
             })
         except Exception as e:
             logger.error(f"Error getting compatibility: {e}")
