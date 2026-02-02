@@ -97,6 +97,7 @@ class Command(BaseCommand):
                             existing.required_overall_compatibility = Decimal(str(compatibility_data.get('required_overall_compatibility', 0)))
                             existing.required_compatible_with_me = Decimal(str(compatibility_data.get('required_compatible_with_me', 0)))
                             existing.required_im_compatible_with = Decimal(str(compatibility_data.get('required_im_compatible_with', 0)))
+                            existing.their_required_compatibility = Decimal(str(compatibility_data.get('their_required_compatibility', 0)))
                             existing.required_mutual_questions_count = compatibility_data.get('required_mutual_questions_count', 0)
                             existing.user1_required_completeness = Decimal(str(compatibility_data.get('user1_required_completeness', 0)))
                             existing.user2_required_completeness = Decimal(str(compatibility_data.get('user2_required_completeness', 0)))
@@ -104,7 +105,7 @@ class Command(BaseCommand):
                             existing.save(update_fields=[
                                 'overall_compatibility', 'compatible_with_me', 'im_compatible_with', 'mutual_questions_count',
                                 'required_overall_compatibility', 'required_compatible_with_me', 'required_im_compatible_with',
-                                'required_mutual_questions_count', 'user1_required_completeness', 'user2_required_completeness',
+                                'their_required_compatibility', 'required_mutual_questions_count', 'user1_required_completeness', 'user2_required_completeness',
                                 'required_completeness_ratio'
                             ])
 
@@ -134,6 +135,7 @@ class Command(BaseCommand):
                                 required_overall_compatibility=Decimal(str(compatibility_data.get('required_overall_compatibility', 0))),
                                 required_compatible_with_me=Decimal(str(compatibility_data.get('required_compatible_with_me', 0))),
                                 required_im_compatible_with=Decimal(str(compatibility_data.get('required_im_compatible_with', 0))),
+                                their_required_compatibility=Decimal(str(compatibility_data.get('their_required_compatibility', 0))),
                                 required_mutual_questions_count=compatibility_data.get('required_mutual_questions_count', 0),
                                 user1_required_completeness=Decimal(str(compatibility_data.get('user1_required_completeness', 0))),
                                 user2_required_completeness=Decimal(str(compatibility_data.get('user2_required_completeness', 0))),

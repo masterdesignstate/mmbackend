@@ -66,10 +66,11 @@ def recalculate_required_compatibility():
                     comp.user2,
                 )
 
-                # Update required fields
+                # Update required fields (including their_required_compatibility)
                 comp.required_overall_compatibility = Decimal(str(result.get('required_overall_compatibility', 0)))
                 comp.required_compatible_with_me = Decimal(str(result.get('required_compatible_with_me', 0)))
                 comp.required_im_compatible_with = Decimal(str(result.get('required_im_compatible_with', 0)))
+                comp.their_required_compatibility = Decimal(str(result.get('their_required_compatibility', 0)))
                 comp.required_mutual_questions_count = result.get('required_mutual_questions_count', 0)
                 comp.user1_required_completeness = Decimal(str(result.get('user1_required_completeness', 0)))
                 comp.user2_required_completeness = Decimal(str(result.get('user2_required_completeness', 0)))
@@ -90,6 +91,7 @@ def recalculate_required_compatibility():
                     'required_overall_compatibility',
                     'required_compatible_with_me',
                     'required_im_compatible_with',
+                    'their_required_compatibility',
                     'required_mutual_questions_count',
                     'user1_required_completeness',
                     'user2_required_completeness',

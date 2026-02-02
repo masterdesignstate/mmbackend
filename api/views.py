@@ -209,8 +209,14 @@ class UserViewSet(viewsets.ModelViewSet):
         min_compatibility = float(request.query_params.get('min_compatibility', 0))
         max_compatibility = float(request.query_params.get('max_compatibility', 100))
         required_only = request.query_params.get('required_only', 'false').lower() == 'true'
+        _raw_scope = request.query_params.get('required_scope', 'my')
+        required_scope = (_raw_scope or 'my').lower()
+        if required_scope not in ('my', 'their'):
+            required_scope = 'my'
         sort_by = request.query_params.get('sort', 'overall_compatibility')  # New: support sorting by required
-        
+        if required_only and required_scope == 'their' and not sort_by.startswith('required_'):
+            sort_by = 'required_im_compatible_with'
+
         # Get age and distance filter parameters
         min_age = request.query_params.get('min_age')
         max_age = request.query_params.get('max_age')
@@ -251,7 +257,7 @@ class UserViewSet(viewsets.ModelViewSet):
 
         print(f"🔍 === COMPATIBLE ENDPOINT CALLED ===")
         print(f"   User: {request.user.id}")
-        print(f"   required_only={required_only}")
+        print(f"   RAW query required_scope={_raw_scope!r}, required_only={required_only}, required_scope={required_scope!r}, sort={request.query_params.get('sort', '')!r}")
         logger.info(f"Compatible users request for user {request.user.id}")
         logger.info(f"Filters: type={compatibility_type}, min={min_compatibility}, max={max_compatibility}, required_only={required_only}")
         logger.info(f"Pagination: page={page}, size={page_size}, offset={offset}")
@@ -315,28 +321,42 @@ class UserViewSet(viewsets.ModelViewSet):
                         output_field=FloatField()
                     )
 
+            # When required_scope=their, sort by "their required" score (compatibility on other user's required only)
+            if apply_required_filter and required_scope == 'their':
+                compatibility_score_expression = Case(
+                    When(user1=request.user, then='their_required_compatibility'),
+                    default='required_compatible_with_me',
+                    output_field=FloatField()
+                )
+
             # When required_only is enabled, we need to sort by completeness first, then by required compatibility
             if apply_required_filter and sort_by.startswith('required_'):
-                # Sort by completeness (1.0 = complete, < 1.0 = incomplete), then by required compatibility score
-                # Completeness measures: Of MY required questions, what % did THEY answer?
-                # When I'm user1: use user2_required_completeness
-                # When I'm user2: use user1_required_completeness
-                compatibilities = Compatibility.objects.filter(
-                    Q(user1=request.user) | Q(user2=request.user)
-                ).select_related('user1', 'user2').annotate(
+                # Completeness: for "my" = what % of MY required did THEY answer; for "their" = what % of THEIR required did I answer
+                annotate_kwargs = dict(
                     other_user_id=Case(
                         When(user1=request.user, then='user2__id'),
                         default='user1__id'
                     ),
                     compatibility_score=compatibility_score_expression,
-                    # Get the completeness from the correct direction
-                    # This is: what % of MY required questions did THEY answer?
                     their_completeness=Case(
                         When(user1=request.user, then='user2_required_completeness'),
                         default='user1_required_completeness',
                         output_field=FloatField()
+                    ),
+                    my_completeness_toward_them=Case(
+                        When(user1=request.user, then='user1_required_completeness'),
+                        default='user2_required_completeness',
+                        output_field=FloatField()
                     )
-                ).order_by('-their_completeness', '-compatibility_score')
+                )
+                if required_scope == 'their':
+                    compatibilities = Compatibility.objects.filter(
+                        Q(user1=request.user) | Q(user2=request.user)
+                    ).select_related('user1', 'user2').annotate(**annotate_kwargs).order_by('-my_completeness_toward_them', '-compatibility_score')
+                else:
+                    compatibilities = Compatibility.objects.filter(
+                        Q(user1=request.user) | Q(user2=request.user)
+                    ).select_related('user1', 'user2').annotate(**annotate_kwargs).order_by('-their_completeness', '-compatibility_score')
             else:
                 compatibilities = Compatibility.objects.filter(
                     Q(user1=request.user) | Q(user2=request.user)
@@ -363,8 +383,10 @@ class UserViewSet(viewsets.ModelViewSet):
                 if max_compatibility < 100:
                     compatibilities = compatibilities.filter(compatibility_score__lte=max_compatibility)
 
-            # Apply tag filters
-            if tags:
+            # Apply tag filters (Liked, Saved, etc.). Skip when Required/Pending/Their Required/Their Pending
+            # are in use: those filters only use required/pending logic, not UserResult tags.
+            using_required_pending_filters = filter_required or filter_pending or filter_their_required or filter_their_pending
+            if tags and not using_required_pending_filters:
                 from .models import UserResult
                 print(f"🔍 Applying tag filters: {tags}")
                 
@@ -375,6 +397,9 @@ class UserViewSet(viewsets.ModelViewSet):
                 
                 for tag in tags:
                     tag_lower = tag.lower()
+                    # Required/Pending/Their Required/Their Pending are filter flags, not UserResult tags - don't filter compatibilities by them
+                    if tag_lower in ('required', 'pending', 'their required', 'their pending'):
+                        continue
                     print(f"🔍 Processing tag: {tag_lower}")
                     
                     if tag_lower == 'liked':
@@ -475,6 +500,8 @@ class UserViewSet(viewsets.ModelViewSet):
                     print(f"🔍 After excluding approved users: {compatibilities.count()} compatibilities remain")
                 
                 # Filter compatibilities to only include users that match tag criteria
+                special_tag_names = {'required', 'pending', 'their required', 'their pending'}
+                had_non_special_tags = any(tag.lower() not in special_tag_names for tag in tags)
                 if tag_filtered_user_ids:
                     print(f"🔍 Tag filtered user IDs: {list(tag_filtered_user_ids)}")
                     compatibilities = compatibilities.filter(
@@ -484,7 +511,8 @@ class UserViewSet(viewsets.ModelViewSet):
                 elif has_not_approved_tag:
                     # If only "Not Approved" tag is selected, we've already filtered by exclusion
                     print(f"🔍 Only 'Not Approved' tag selected, using exclusion filter")
-                else:
+                elif had_non_special_tags:
+                    # Had real tags (Liked, Saved, etc.) but no users matched
                     print(f"🔍 No users match tag criteria, returning empty result")
                     return Response({
                         'results': [],
@@ -561,6 +589,7 @@ class UserViewSet(viewsets.ModelViewSet):
                     print(f"🔍 Applied bio search filter: '{search_term}'")
 
             if apply_required_filter:
+                print(f"🔍 [required] ENTERING required_filter path: required_scope={required_scope!r}")
                 compatibility_results = []
 
                 for comp in compatibilities:
@@ -582,6 +611,7 @@ class UserViewSet(viewsets.ModelViewSet):
                             'required_overall_compatibility': comp.required_overall_compatibility,
                             'required_compatible_with_me': comp.required_compatible_with_me if comp.user1 == request.user else comp.required_im_compatible_with,
                             'required_im_compatible_with': comp.required_im_compatible_with if comp.user1 == request.user else comp.required_compatible_with_me,
+                            'their_required_compatibility': comp.their_required_compatibility if comp.user1 == request.user else comp.required_compatible_with_me,
                             'required_mutual_questions_count': comp.required_mutual_questions_count,
                         },
                         'missing_required': False
@@ -603,13 +633,13 @@ class UserViewSet(viewsets.ModelViewSet):
                         question_id__in=current_user_required_qids
                     ).values_list('user_id', 'question_id')
 
-                    user_answered_questions: dict[object, set] = defaultdict(set)
+                    user_answered_questions = defaultdict(set)
                     for user_id, question_id in other_user_answers:
-                        user_answered_questions[user_id].add(question_id)
+                        user_answered_questions[str(user_id)].add(question_id)
 
                     for item in compatibility_results:
                         other_user_id = item['user'].id
-                        answered_questions = user_answered_questions.get(other_user_id, set())
+                        answered_questions = user_answered_questions.get(str(other_user_id), set())
                         # missing_required = True if other user hasn't answered all questions I marked required
                         item['missing_required'] = not current_user_required_qids.issubset(answered_questions)
                         if item['missing_required']:
@@ -664,6 +694,7 @@ class UserViewSet(viewsets.ModelViewSet):
                         )
 
                 # their_missing_required: has current user answered all questions that OTHER user marked required?
+                # Normalize all IDs to string for dict keys (UUID vs str can differ across DB/ORM)
                 other_user_ids = [item['user'].id for item in compatibility_results]
 
                 # Per-user required: from UserRequiredQuestion
@@ -671,9 +702,9 @@ class UserViewSet(viewsets.ModelViewSet):
                     user_id__in=other_user_ids
                 ).values_list('user_id', 'question_id')
 
-                other_user_required_qids: dict[object, set] = defaultdict(set)
+                other_user_required_qids = defaultdict(set)
                 for user_id, question_id in other_users_required_answered:
-                    other_user_required_qids[user_id].add(question_id)
+                    other_user_required_qids[str(user_id)].add(question_id)
 
                 # Current user's answered question IDs (for subset check)
                 current_user_answered_qids = set(
@@ -683,14 +714,18 @@ class UserViewSet(viewsets.ModelViewSet):
                 their_missing_user_ids = []
                 for item in compatibility_results:
                     other_user_id = item['user'].id
-                    their_required_qids = other_user_required_qids.get(other_user_id, set())
+                    key = str(other_user_id).lower()
+                    their_required_qids = other_user_required_qids.get(key, set())
+                    if not their_required_qids:
+                        their_required_qids = other_user_required_qids.get(str(other_user_id), set())
                     if their_required_qids:
                         # their_missing_required = True if current user hasn't answered all questions they marked required
                         item['their_missing_required'] = not their_required_qids.issubset(current_user_answered_qids)
                         if item['their_missing_required']:
                             their_missing_user_ids.append(other_user_id)
                     else:
-                        item['their_missing_required'] = False
+                        # They have NO required questions: exclude from "Their Required" (only show people who have required AND I answered all)
+                        item['their_missing_required'] = True
 
                 # Calculate compatibility_non_required for Their Pending users (if not already calculated)
                 if their_missing_user_ids:
@@ -749,16 +784,40 @@ class UserViewSet(viewsets.ModelViewSet):
                                 user2_answers=other_answers,
                             )
 
-                def get_sort_score(result: dict) -> float:
+                # When required_scope=their, compute their_required_compatibility on the fly if missing/0 (e.g. never recalculated)
+                if required_scope == 'their':
+                    for item in compatibility_results:
+                        trc = item['compatibility'].get('their_required_compatibility')
+                        try:
+                            trc_val = float(trc) if trc is not None else 0
+                        except (TypeError, ValueError):
+                            trc_val = 0
+                        if trc_val == 0:
+                            try:
+                                data = CompatibilityService.calculate_compatibility_between_users(
+                                    request.user, item['user']
+                                )
+                                item['compatibility']['their_required_compatibility'] = data.get(
+                                    'their_required_compatibility', 0
+                                )
+                            except Exception:
+                                pass
+
+                def get_sort_score(result: dict, use_their_required: bool = False) -> float:
+                    # When required_scope=their, sort by their_required_compatibility (how well I match their required)
+                    if use_their_required:
+                        return float(result['compatibility'].get('their_required_compatibility', 0.0) or 0.0)
                     # Use non-required compatibility for Pending or Their Pending users
                     if (result.get('missing_required') or result.get('their_missing_required')) and result.get('compatibility_non_required'):
                         return float(result['compatibility_non_required'].get(compatibility_field, 0.0) or 0.0)
                     return float(result['compatibility'].get(compatibility_field, 0.0) or 0.0)
 
-                compatibility_results = [
-                    result for result in compatibility_results
-                    if min_compatibility <= get_sort_score(result) <= max_compatibility
-                ]
+                # Min/max compatibility filter; skip when "Their Required" tag is on so everyone who qualifies is shown
+                if not filter_their_required:
+                    compatibility_results = [
+                        result for result in compatibility_results
+                        if min_compatibility <= get_sort_score(result, use_their_required=(required_scope == 'their')) <= max_compatibility
+                    ]
 
                 # Apply Required/Pending/Their Required/Their Pending filters (server-side)
                 # These filters are applied before pagination to ensure correct page counts
@@ -775,23 +834,49 @@ class UserViewSet(viewsets.ModelViewSet):
                 if filter_their_required and not filter_their_pending:
                     # Show only users where their_missing_required is False (I answered all their required questions)
                     compatibility_results = [r for r in compatibility_results if not r.get('their_missing_required', False)]
-                    print(f"🔍 Filtered to Their Required: {len(compatibility_results)} results")
+                    their_required_usernames = [r['user'].username for r in compatibility_results]
+                    print(f"🔍 Filtered to Their Required: {len(compatibility_results)} results: {their_required_usernames}")
                 elif filter_their_pending and not filter_their_required:
                     # Show only users where their_missing_required is True (I haven't answered all their required questions)
                     compatibility_results = [r for r in compatibility_results if r.get('their_missing_required', False)]
                     print(f"🔍 Filtered to Their Pending: {len(compatibility_results)} results")
                 # If both filter_their_required and filter_their_pending are True, show all (no filtering)
 
-                compatibility_results.sort(
-                    key=lambda result: (
-                        result.get('missing_required', False),
-                        -get_sort_score(result),
-                        str(result['user'].id)
+                # Sort: when required_scope=their use their_required_compatibility and their_missing_required; else use my required
+                print(f"🔍 [required] BEFORE SORT: required_scope={required_scope!r}, result_count={len(compatibility_results)}")
+                for i, r in enumerate(compatibility_results[:5]):
+                    trc = r['compatibility'].get('their_required_compatibility')
+                    rcm = r['compatibility'].get('required_compatible_with_me')
+                    ric = r['compatibility'].get('required_im_compatible_with')
+                    print(f"   [{i}] user={r['user'].id} their_required_compat={trc} required_cw_me={rcm} required_im_cw={ric}")
+                if required_scope == 'their':
+                    compatibility_results.sort(
+                        key=lambda result: (
+                            result.get('their_missing_required', False),
+                            -get_sort_score(result, use_their_required=True),
+                            str(result['user'].id)
+                        )
                     )
-                )
+                    print(f"🔍 [required] SORTED BY: their_missing_required, -their_required_compatibility, user_id")
+                else:
+                    compatibility_results.sort(
+                        key=lambda result: (
+                            result.get('missing_required', False),
+                            -get_sort_score(result, use_their_required=False),
+                            str(result['user'].id)
+                        )
+                    )
+                    print(f"🔍 [required] SORTED BY: missing_required, -required_compat (my), user_id")
+                for i, r in enumerate(compatibility_results[:5]):
+                    trc = r['compatibility'].get('their_required_compatibility')
+                    print(f"   AFTER SORT [{i}] user={r['user'].id} their_required_compat={trc}")
+                order_ids = [str(r['user'].id) for r in compatibility_results[:10]]
+                print(f"🔍 [required] FIRST 10 USER IDS IN ORDER: {order_ids}")
 
                 total_users = len(compatibility_results)
                 paginated_results = compatibility_results[offset:offset + page_size]
+                page_ids = [str(r['user'].id) for r in paginated_results]
+                print(f"🔍 [required] PAGE {page} (offset={offset}): returning user ids order: {page_ids}")
 
                 response_data = []
                 for result in paginated_results:
@@ -846,6 +931,7 @@ class UserViewSet(viewsets.ModelViewSet):
                         'required_overall_compatibility': comp.required_overall_compatibility,
                         'required_compatible_with_me': comp.required_compatible_with_me if is_user1 else comp.required_im_compatible_with,
                         'required_im_compatible_with': comp.required_im_compatible_with if is_user1 else comp.required_compatible_with_me,
+                        'their_required_compatibility': comp.their_required_compatibility if is_user1 else comp.required_compatible_with_me,
                         'required_mutual_questions_count': comp.required_mutual_questions_count,
                         'user1_required_completeness': comp.user1_required_completeness if is_user1 else comp.user2_required_completeness,
                         'user2_required_completeness': comp.user2_required_completeness if is_user1 else comp.user1_required_completeness,
@@ -919,6 +1005,7 @@ class UserViewSet(viewsets.ModelViewSet):
                 'required_overall_compatibility': compatibility.required_overall_compatibility,
                 'required_compatible_with_me': compatibility.required_compatible_with_me if is_user1 else compatibility.required_im_compatible_with,
                 'required_im_compatible_with': compatibility.required_im_compatible_with if is_user1 else compatibility.required_compatible_with_me,
+                'their_required_compatibility': compatibility.their_required_compatibility if is_user1 else compatibility.required_compatible_with_me,
                 'required_mutual_questions_count': compatibility.required_mutual_questions_count,
                 # "My Required" = their completeness on MY questions (how many of my Qs did they answer?)
                 # "Their Required" = my completeness on THEIR questions (how many of their Qs did I answer?)

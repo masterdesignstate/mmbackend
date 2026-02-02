@@ -211,6 +211,11 @@ class Compatibility(models.Model):
     required_compatible_with_me = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     required_im_compatible_with = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     required_mutual_questions_count = models.PositiveIntegerField(default=0)
+    # Their Required: compatibility score using ONLY the other user's required questions (different per pair)
+    their_required_compatibility = models.DecimalField(
+        max_digits=5, decimal_places=2, default=0,
+        help_text="Compatibility calculated only on user2's required questions (their required from user1's perspective)"
+    )
 
     # Directional completeness ratios (what % of their required questions have I answered?)
     user1_required_completeness = models.DecimalField(

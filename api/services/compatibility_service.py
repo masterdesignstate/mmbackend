@@ -266,6 +266,7 @@ class CompatibilityService:
                 'required_overall_compatibility': overall_compatibility,
                 'required_compatible_with_me': compatible_with_me,
                 'required_im_compatible_with': im_compatible_with,
+                'their_required_compatibility': im_compatible_with,
                 'required_mutual_questions_count': mutual_count,
                 'user1_required_completeness': 1.0,
                 'user2_required_completeness': 1.0,
@@ -289,6 +290,8 @@ class CompatibilityService:
 
             required_compatible_with_me = cw_me_1
             required_im_compatible_with = im_cw_2
+            # Their Required: compatibility using ONLY the other user's required questions (explicit third type)
+            their_required_compatibility = im_cw_2  # score on user2's required (their required from user1's perspective)
             required_overall = (overall_1 + overall_2) / 2.0 if (user1_required_qids or user2_required_qids) else overall_compatibility
             required_mutual_count = n1 + n2
 
@@ -307,6 +310,7 @@ class CompatibilityService:
                 'required_overall_compatibility': round(required_overall, 2),
                 'required_compatible_with_me': round(required_compatible_with_me, 2),
                 'required_im_compatible_with': round(required_im_compatible_with, 2),
+                'their_required_compatibility': round(their_required_compatibility, 2),
                 'required_mutual_questions_count': required_mutual_count,
                 'user1_required_completeness': round(user1_completeness, 3),
                 'user2_required_completeness': round(user2_completeness, 3),
@@ -505,6 +509,7 @@ class CompatibilityService:
                 comp.required_overall_compatibility = compatibility_data['required_overall_compatibility']
                 comp.required_compatible_with_me = compatibility_data['required_compatible_with_me']
                 comp.required_im_compatible_with = compatibility_data['required_im_compatible_with']
+                comp.their_required_compatibility = compatibility_data['their_required_compatibility']
                 comp.required_mutual_questions_count = compatibility_data['required_mutual_questions_count']
                 comp.user1_required_completeness = compatibility_data['user1_required_completeness']
                 comp.user2_required_completeness = compatibility_data['user2_required_completeness']
@@ -521,6 +526,8 @@ class CompatibilityService:
                 comp.required_overall_compatibility = compatibility_data['required_overall_compatibility']
                 comp.required_compatible_with_me = compatibility_data['required_im_compatible_with']
                 comp.required_im_compatible_with = compatibility_data['required_compatible_with_me']
+                # Their required: from user2's perspective = score on user1's required
+                comp.their_required_compatibility = compatibility_data['required_compatible_with_me']
                 comp.required_mutual_questions_count = compatibility_data['required_mutual_questions_count']
                 # Completeness ratios also swap
                 comp.user1_required_completeness = compatibility_data['user2_required_completeness']
@@ -539,6 +546,7 @@ class CompatibilityService:
                         required_overall_compatibility=compatibility_data['required_overall_compatibility'],
                         required_compatible_with_me=compatibility_data['required_compatible_with_me'],
                         required_im_compatible_with=compatibility_data['required_im_compatible_with'],
+                        their_required_compatibility=compatibility_data['their_required_compatibility'],
                         required_mutual_questions_count=compatibility_data['required_mutual_questions_count'],
                         user1_required_completeness=compatibility_data['user1_required_completeness'],
                         user2_required_completeness=compatibility_data['user2_required_completeness'],
@@ -555,6 +563,7 @@ class CompatibilityService:
             'required_overall_compatibility',
             'required_compatible_with_me',
             'required_im_compatible_with',
+            'their_required_compatibility',
             'required_mutual_questions_count',
             'user1_required_completeness',
             'user2_required_completeness',

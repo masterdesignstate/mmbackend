@@ -147,7 +147,8 @@ class CompatibilitySerializer(serializers.ModelSerializer):
             'compatible_with_me', 'im_compatible_with',
             'mutual_questions_count',
             'required_overall_compatibility', 'required_compatible_with_me',
-            'required_im_compatible_with', 'required_mutual_questions_count',
+            'required_im_compatible_with', 'their_required_compatibility',
+            'required_mutual_questions_count',
             'user1_required_completeness', 'user2_required_completeness',
             'required_completeness_ratio',  # Deprecated - use user1/user2 fields instead
             'last_calculated'
@@ -156,7 +157,8 @@ class CompatibilitySerializer(serializers.ModelSerializer):
             'id', 'overall_compatibility', 'compatible_with_me',
             'im_compatible_with', 'mutual_questions_count',
             'required_overall_compatibility', 'required_compatible_with_me',
-            'required_im_compatible_with', 'required_mutual_questions_count',
+            'required_im_compatible_with', 'their_required_compatibility',
+            'required_mutual_questions_count',
             'user1_required_completeness', 'user2_required_completeness',
             'required_completeness_ratio',
             'last_calculated'
