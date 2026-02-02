@@ -11,7 +11,7 @@ from collections import defaultdict
 logger = logging.getLogger(__name__)
 
 from .models import (
-    User, Tag, Question, UserAnswer, Compatibility,
+    User, Tag, Question, UserAnswer, UserRequiredQuestion, Compatibility,
     UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, Controls,
     CompatibilityJob, Notification, Conversation,
 )
@@ -23,7 +23,7 @@ from .services.compatibility_queue import (
 )
 from .serializers import (
     UserSerializer, TagSerializer, QuestionSerializer, UserAnswerSerializer,
-    CompatibilitySerializer, UserResultSerializer, MessageSerializer,
+    UserRequiredQuestionSerializer, CompatibilitySerializer, UserResultSerializer, MessageSerializer,
     PictureModerationSerializer, UserReportSerializer, UserOnlineStatusSerializer,
     DetailedUserSerializer, DetailedQuestionSerializer, UserTagSerializer,
     SimpleUserSerializer, ControlsSerializer, NotificationSerializer, ConversationSerializer,
@@ -587,29 +587,20 @@ class UserViewSet(viewsets.ModelViewSet):
                         'missing_required': False
                     })
 
-                # Get all required questions (is_required_for_match=True) that the current user has answered
-                # Required questions are determined by Question.is_required_for_match = True
-                all_required_question_ids = set(
-                    Question.objects.filter(is_required_for_match=True).values_list('id', flat=True)
-                )
-
-                # Get which required questions the current user has answered
-                current_user_answered_required = set(
-                    UserAnswer.objects.filter(
-                        user=request.user,
-                        question_id__in=all_required_question_ids
-                    ).values_list('question_id', flat=True)
+                # Per-user required: from UserRequiredQuestion
+                current_user_required_qids = set(
+                    UserRequiredQuestion.objects.filter(user=request.user).values_list('question_id', flat=True)
                 )
 
                 missing_user_ids = []
-                if current_user_answered_required:
-                    print(f"🔍 Current user has answered {len(current_user_answered_required)} required questions (required filter)")
+                if current_user_required_qids:
+                    print(f"🔍 Current user has {len(current_user_required_qids)} required questions (per-user required filter)")
 
                     other_user_ids = [item['user'].id for item in compatibility_results]
-                    # Get which required questions (that current user answered) each other user has answered
+                    # For each other user: which of my required questions have they answered?
                     other_user_answers = UserAnswer.objects.filter(
                         user_id__in=other_user_ids,
-                        question_id__in=current_user_answered_required
+                        question_id__in=current_user_required_qids
                     ).values_list('user_id', 'question_id')
 
                     user_answered_questions: dict[object, set] = defaultdict(set)
@@ -619,8 +610,8 @@ class UserViewSet(viewsets.ModelViewSet):
                     for item in compatibility_results:
                         other_user_id = item['user'].id
                         answered_questions = user_answered_questions.get(other_user_id, set())
-                        # missing_required = True if other user hasn't answered all required questions that I answered
-                        item['missing_required'] = not current_user_answered_required.issubset(answered_questions)
+                        # missing_required = True if other user hasn't answered all questions I marked required
+                        item['missing_required'] = not current_user_required_qids.issubset(answered_questions)
                         if item['missing_required']:
                             missing_user_ids.append(other_user_id)
 
@@ -629,7 +620,7 @@ class UserViewSet(viewsets.ModelViewSet):
                         UserAnswer.objects.filter(
                             user=request.user
                         ).exclude(
-                            question_id__in=all_required_question_ids
+                            question_id__in=current_user_required_qids
                         ).only(
                             'question_id',
                             'me_answer',
@@ -644,7 +635,7 @@ class UserViewSet(viewsets.ModelViewSet):
                     other_answers_qs = UserAnswer.objects.filter(
                         user_id__in=missing_user_ids
                     ).exclude(
-                        question_id__in=all_required_question_ids
+                        question_id__in=current_user_required_qids
                     ).only(
                         'user_id',
                         'question_id',
@@ -672,54 +663,40 @@ class UserViewSet(viewsets.ModelViewSet):
                             user2_answers=other_answers,
                         )
 
-                # Calculate their_missing_required - has current user answered all required questions that OTHER user answered?
-                # Required questions are determined by Question.is_required_for_match = True
+                # their_missing_required: has current user answered all questions that OTHER user marked required?
                 other_user_ids = [item['user'].id for item in compatibility_results]
 
-                # Get all required question IDs (questions marked as is_required_for_match=True)
-                required_question_ids_for_match = set(
-                    Question.objects.filter(is_required_for_match=True).values_list('id', flat=True)
-                )
-
-                # Get which required questions each other user has answered
-                other_users_required_answered = UserAnswer.objects.filter(
-                    user_id__in=other_user_ids,
-                    question_id__in=required_question_ids_for_match
+                # Per-user required: from UserRequiredQuestion
+                other_users_required_answered = UserRequiredQuestion.objects.filter(
+                    user_id__in=other_user_ids
                 ).values_list('user_id', 'question_id')
 
-                # Build a dict: other_user_id -> set of required question IDs they answered
-                other_user_answered_required: dict[object, set] = defaultdict(set)
+                other_user_required_qids: dict[object, set] = defaultdict(set)
                 for user_id, question_id in other_users_required_answered:
-                    other_user_answered_required[user_id].add(question_id)
+                    other_user_required_qids[user_id].add(question_id)
 
-                # Get which required questions the current user has answered
-                current_user_answered_required_ids = set(
-                    UserAnswer.objects.filter(
-                        user=request.user,
-                        question_id__in=required_question_ids_for_match
-                    ).values_list('question_id', flat=True)
+                # Current user's answered question IDs (for subset check)
+                current_user_answered_qids = set(
+                    UserAnswer.objects.filter(user=request.user).values_list('question_id', flat=True)
                 )
 
-                # For each other user, check if current user answered all the required questions they answered
                 their_missing_user_ids = []
                 for item in compatibility_results:
                     other_user_id = item['user'].id
-                    their_answered_required_qs = other_user_answered_required.get(other_user_id, set())
-                    if their_answered_required_qs:
-                        # their_missing_required = True if current user hasn't answered all required questions that they answered
-                        item['their_missing_required'] = not their_answered_required_qs.issubset(current_user_answered_required_ids)
+                    their_required_qids = other_user_required_qids.get(other_user_id, set())
+                    if their_required_qids:
+                        # their_missing_required = True if current user hasn't answered all questions they marked required
+                        item['their_missing_required'] = not their_required_qids.issubset(current_user_answered_qids)
                         if item['their_missing_required']:
                             their_missing_user_ids.append(other_user_id)
                     else:
-                        # If other user hasn't answered any required questions, consider it as "complete"
                         item['their_missing_required'] = False
 
                 # Calculate compatibility_non_required for Their Pending users (if not already calculated)
                 if their_missing_user_ids:
-                    # Filter to users who don't already have compatibility_non_required
                     their_pending_without_non_required = [
                         uid for uid in their_missing_user_ids
-                        if uid not in missing_user_ids  # Not already calculated for Pending
+                        if uid not in missing_user_ids
                     ]
 
                     if their_pending_without_non_required:
@@ -729,7 +706,7 @@ class UserViewSet(viewsets.ModelViewSet):
                                 UserAnswer.objects.filter(
                                     user=request.user
                                 ).exclude(
-                                    question_id__in=all_required_question_ids
+                                    question_id__in=current_user_required_qids
                                 ).only(
                                     'question_id',
                                     'me_answer',
@@ -744,7 +721,7 @@ class UserViewSet(viewsets.ModelViewSet):
                         their_pending_answers_qs = UserAnswer.objects.filter(
                             user_id__in=their_pending_without_non_required
                         ).exclude(
-                            question_id__in=all_required_question_ids
+                            question_id__in=current_user_required_qids
                         ).only(
                             'user_id',
                             'question_id',
@@ -1753,8 +1730,15 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
             looking_for_open_to_all = request.data.get('looking_for_open_to_all', False)
             looking_for_importance = request.data.get('looking_for_importance', 1)
             looking_for_share = request.data.get('looking_for_share', True)
-            
-            # Create or update UserAnswer
+            is_required_for_me = request.data.get('is_required_for_me', False)
+
+            # Sync UserRequiredQuestion (required for me is stored there; user can require without answering)
+            if is_required_for_me:
+                UserRequiredQuestion.objects.get_or_create(user=user, question=question)
+            else:
+                UserRequiredQuestion.objects.filter(user=user, question=question).delete()
+
+            # Create or update UserAnswer (no longer store is_required_for_me on UserAnswer)
             user_answer, created = UserAnswer.objects.update_or_create(
                 user=user,
                 question=question,
@@ -1846,6 +1830,45 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
             serializer = self.get_serializer(answers, many=True)
             return Response(serializer.data)
         return Response({'error': 'question_id parameter required'}, status=400)
+
+
+class UserRequiredQuestionViewSet(viewsets.ModelViewSet):
+    """List/add/remove questions a user marks as required for matching (independent of having answered)."""
+    serializer_class = UserRequiredQuestionSerializer
+    permission_classes = [permissions.AllowAny]
+    http_method_names = ['get', 'post', 'delete', 'head', 'options']
+
+    def get_queryset(self):
+        user_id = self.request.query_params.get('user')
+        if user_id:
+            return UserRequiredQuestion.objects.filter(user_id=user_id).select_related('question', 'user')
+        if self.request.user.is_authenticated:
+            return UserRequiredQuestion.objects.filter(user=self.request.user).select_related('question', 'user')
+        return UserRequiredQuestion.objects.none()
+
+    def create(self, request, *args, **kwargs):
+        question_id = request.data.get('question_id')
+        if not question_id:
+            return Response({'error': 'question_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        user = request.user if request.user.is_authenticated else None
+        if not user:
+            user_id = request.data.get('user_id')
+            if not user_id:
+                return Response({'error': 'user_id or authentication required'}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                user = User.objects.get(id=user_id)
+            except User.DoesNotExist:
+                return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            question = Question.objects.get(id=question_id)
+        except Question.DoesNotExist:
+            return Response({'error': 'Question not found'}, status=status.HTTP_404_NOT_FOUND)
+        obj, created = UserRequiredQuestion.objects.get_or_create(user=user, question=question)
+        serializer = self.get_serializer(obj)
+        return Response(serializer.data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+    def perform_destroy(self, instance):
+        instance.delete()
 
 
 class CompatibilityViewSet(viewsets.ReadOnlyModelViewSet):

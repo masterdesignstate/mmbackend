@@ -14,16 +14,12 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'mmbackend.settings')
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 django.setup()
 
-from api.models import Compatibility, Question, UserAnswer
-from django.db.models import Q, Prefetch
+from api.models import Compatibility, UserAnswer, UserRequiredQuestion
+from django.db.models import Q
 
 
 def fix_zero_completeness():
-    """Fix records with 0 completeness using efficient queries"""
-
-    # Get total required question count
-    total_required_count = Question.objects.filter(is_required_for_match=True).count()
-    print(f"📊 Total required questions: {total_required_count}\n")
+    """Fix records with 0 completeness using per-user UserRequiredQuestion."""
 
     # Find records with 0 completeness
     records_to_fix = Compatibility.objects.filter(
@@ -37,35 +33,28 @@ def fix_zero_completeness():
         print("✅ All records already have completeness calculated!")
         return
 
-    # Build a cache of user required answers to avoid repeated queries
-    print("🔄 Building cache of user required answers...")
+    # Build caches: per-user required question IDs (from UserRequiredQuestion) and answered question IDs
+    print("🔄 Building cache of user required and answered questions...")
     user_required_answers = {}
+    user_answered_qids = {}
 
-    # Get all unique users from records to fix
     user_ids = set()
     for comp in records_to_fix:
         user_ids.add(comp.user1_id)
         user_ids.add(comp.user2_id)
 
-    print(f"   Caching answers for {len(user_ids)} unique users...")
+    print(f"   Caching for {len(user_ids)} unique users...")
 
-    # Fetch all required answers for these users in one query
-    answers = UserAnswer.objects.filter(
-        user_id__in=user_ids,
-        question__is_required_for_match=True
-    ).values('user_id', 'question_id')
+    # Per-user required: from UserRequiredQuestion
+    for row in UserRequiredQuestion.objects.filter(user_id__in=user_ids).values('user_id', 'question_id'):
+        user_required_answers.setdefault(row['user_id'], set()).add(row['question_id'])
 
-    # Build the cache
-    for answer in answers:
-        user_id = answer['user_id']
-        question_id = answer['question_id']
-        if user_id not in user_required_answers:
-            user_required_answers[user_id] = set()
-        user_required_answers[user_id].add(question_id)
+    # All answered question IDs per user
+    for row in UserAnswer.objects.filter(user_id__in=user_ids).values('user_id', 'question_id'):
+        user_answered_qids.setdefault(row['user_id'], set()).add(row['question_id'])
 
     print(f"   ✅ Cache built\n")
 
-    # Process in batches
     batch_size = 500
     updated = 0
 
@@ -77,21 +66,17 @@ def fix_zero_completeness():
 
         for comp in batch:
             try:
-                # Get answers from cache
-                a1_req = user_required_answers.get(comp.user1_id, set())
-                a2_req = user_required_answers.get(comp.user2_id, set())
+                # Per-user required: user1_required_completeness = % of user2's required that user1 answered
+                user1_req = user_required_answers.get(comp.user1_id, set())
+                user2_req = user_required_answers.get(comp.user2_id, set())
+                user1_answered = user_answered_qids.get(comp.user1_id, set())
+                user2_answered = user_answered_qids.get(comp.user2_id, set())
 
-                # Calculate mutual required questions
-                required_mutual_count = len(a1_req & a2_req)
+                user2_required_count = len(user2_req)
+                user1_completeness = (len(user1_answered & user2_req) / user2_required_count) if user2_required_count > 0 else 0.0
+                user1_required_count = len(user1_req)
+                user2_completeness = (len(user2_answered & user1_req) / user1_required_count) if user1_required_count > 0 else 0.0
 
-                # Calculate directional completeness
-                user1_required_answered = len(a1_req)
-                user2_required_answered = len(a2_req)
-
-                user1_completeness = (required_mutual_count / user2_required_answered) if user2_required_answered > 0 else 0.0
-                user2_completeness = (required_mutual_count / user1_required_answered) if user1_required_answered > 0 else 0.0
-
-                # Clamp 0-1
                 user1_completeness = max(0.0, min(1.0, user1_completeness))
                 user2_completeness = max(0.0, min(1.0, user2_completeness))
 

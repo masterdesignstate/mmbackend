@@ -4,7 +4,7 @@ from typing import Dict, List, Tuple, Optional
 from django.db.models import Q
 from django.core.cache import cache
 from django.db import IntegrityError
-from ..models import User, UserAnswer, Compatibility, Controls, Question
+from ..models import User, UserAnswer, UserRequiredQuestion, Compatibility, Controls
 
 
 class CompatibilityService:
@@ -174,25 +174,23 @@ class CompatibilityService:
         exclude_required: bool = False,
         user1_answers: Optional[List[UserAnswer]] = None,
         user2_answers: Optional[List[UserAnswer]] = None,
-        total_required_count: Optional[int] = None,
     ) -> Dict[str, float]:
         """
         Calculate full compatibility between two users with caching.
-        Now also computes required compatibility scores.
-        
+        Required compatibility uses per-user UserRequiredQuestion (not UserAnswer).
+
         Returns dictionary with compatibility scores and metadata including:
         - overall_compatibility, compatible_with_me, im_compatible_with, mutual_questions_count
         - required_overall_compatibility, required_compatible_with_me, required_im_compatible_with
-        - required_mutual_questions_count, required_completeness_ratio
+        - required_mutual_questions_count, user1_required_completeness, user2_required_completeness
 
         Args:
             user1: First user
             user2: Second user
             required_only: If True, only use questions marked as required for matching (legacy param)
             exclude_required: If True, caller is expected to supply answers with required questions removed
-            user1_answers: Optional pre-fetched answers for user1 (with select_related('question'))
-            user2_answers: Optional pre-fetched answers for user2 (with select_related('question'))
-            total_required_count: Optional pre-computed count of total required questions (for optimization)
+            user1_answers: Optional pre-fetched answers for user1 (required sets come from UserRequiredQuestion)
+            user2_answers: Optional pre-fetched answers for user2 (required sets come from UserRequiredQuestion)
         """
         if required_only and exclude_required:
             raise ValueError("required_only and exclude_required cannot both be True")
@@ -254,85 +252,66 @@ class CompatibilityService:
             'mutual_questions_count': mutual_count,
         }
 
-        # Calculate required compatibility
-        if total_required_count is None:
-            total_required_count = Question.objects.filter(is_required_for_match=True).count()
+        # Calculate required compatibility (per-user: from UserRequiredQuestion)
+        user1_required_qids = set(
+            UserRequiredQuestion.objects.filter(user=user1).values_list('question_id', flat=True)
+        )
+        user2_required_qids = set(
+            UserRequiredQuestion.objects.filter(user=user2).values_list('question_id', flat=True)
+        )
 
-        if total_required_count == 0:
-            # No required questions: required scores equal overall scores
+        if not user1_required_qids and not user2_required_qids:
+            # No per-user required: required scores equal overall, completeness 1.0
             result.update({
                 'required_overall_compatibility': overall_compatibility,
                 'required_compatible_with_me': compatible_with_me,
                 'required_im_compatible_with': im_compatible_with,
                 'required_mutual_questions_count': mutual_count,
+                'user1_required_completeness': 1.0,
+                'user2_required_completeness': 1.0,
                 'required_completeness_ratio': 1.0,
             })
         else:
-            # Build required-only answer dictionaries
-            # Fetch question IDs that are required (optimize: cache this if called multiple times)
-            required_question_ids = set(
-                Question.objects.filter(is_required_for_match=True).values_list('id', flat=True)
+            # Per-user required: "my required" (user1's) and "their required" (user2's)
+            a1_my_req = {qid: a1_all[qid] for qid in user1_required_qids if qid in a1_all}
+            a2_for_my_req = {qid: a2_all[qid] for qid in user1_required_qids if qid in a2_all}
+            a1_for_their_req = {qid: a1_all[qid] for qid in user2_required_qids if qid in a1_all}
+            a2_their_req = {qid: a2_all[qid] for qid in user2_required_qids if qid in a2_all}
+
+            # Score on questions I (user1) marked required -> required_compatible_with_me
+            cw_me_1, im_cw_1, overall_1, n1 = CompatibilityService._compute_scores_from_answer_maps(
+                a1_my_req, a2_for_my_req, constants
             )
-            
-            # Filter answers to only those for required questions
-            a1_req = {
-                qid: answer for qid, answer in a1_all.items()
-                if qid in required_question_ids
-            }
-            a2_req = {
-                qid: answer for qid, answer in a2_all.items()
-                if qid in required_question_ids
-            }
+            # Score on questions they (user2) marked required -> required_im_compatible_with
+            cw_me_2, im_cw_2, overall_2, n2 = CompatibilityService._compute_scores_from_answer_maps(
+                a1_for_their_req, a2_their_req, constants
+            )
 
-            # Find mutual required questions
-            mutual_req_ids = set(a1_req.keys()) & set(a2_req.keys())
-            required_mutual_count = len(mutual_req_ids)
+            required_compatible_with_me = cw_me_1
+            required_im_compatible_with = im_cw_2
+            required_overall = (overall_1 + overall_2) / 2.0 if (user1_required_qids or user2_required_qids) else overall_compatibility
+            required_mutual_count = n1 + n2
 
-            if required_mutual_count == 0:
-                # No mutual required questions
-                result.update({
-                    'required_overall_compatibility': 0.0,
-                    'required_compatible_with_me': 0.0,
-                    'required_im_compatible_with': 0.0,
-                    'required_mutual_questions_count': 0,
-                    'user1_required_completeness': 0.0,
-                    'user2_required_completeness': 0.0,
-                    'required_completeness_ratio': 0.0,
-                })
-            else:
-                # Calculate required compatibility on mutual required questions only
-                # No penalty multiplier - just the base score
-                required_compatible_with_me, required_im_compatible_with, required_overall, _ = \
-                    CompatibilityService._compute_scores_from_answer_maps(a1_req, a2_req, constants)
+            # user1_required_completeness: of questions user2 marked required (and answered), what % did user1 answer?
+            user2_required_answered = len(a2_their_req)
+            user1_completeness = (len(a1_for_their_req) / user2_required_answered) if user2_required_answered > 0 else 0.0
+            # user2_required_completeness: of questions user1 marked required (and answered), what % did user2 answer?
+            user1_required_answered = len(a1_my_req)
+            user2_completeness = (len(a2_for_my_req) / user1_required_answered) if user1_required_answered > 0 else 0.0
 
-                # Calculate directional completeness ratios
-                # user1_required_completeness: Of user2's answered required questions, what % did user1 also answer?
-                # user2_required_completeness: Of user1's answered required questions, what % did user2 also answer?
-                user1_required_answered = len(a1_req)
-                user2_required_answered = len(a2_req)
+            user1_completeness = max(0.0, min(1.0, user1_completeness))
+            user2_completeness = max(0.0, min(1.0, user2_completeness))
+            combined_completeness = (user1_completeness + user2_completeness) / 2
 
-                # From user1's perspective: of user2's answered required questions, how many did user1 answer?
-                user1_completeness = (required_mutual_count / user2_required_answered) if user2_required_answered > 0 else 0.0
-
-                # From user2's perspective: of user1's answered required questions, how many did user2 answer?
-                user2_completeness = (required_mutual_count / user1_required_answered) if user1_required_answered > 0 else 0.0
-
-                # Clamp 0-1
-                user1_completeness = max(0.0, min(1.0, user1_completeness))
-                user2_completeness = max(0.0, min(1.0, user2_completeness))
-
-                # Combined (average) for backward compatibility
-                combined_completeness = (user1_completeness + user2_completeness) / 2
-
-                result.update({
-                    'required_overall_compatibility': round(required_overall, 2),
-                    'required_compatible_with_me': round(required_compatible_with_me, 2),
-                    'required_im_compatible_with': round(required_im_compatible_with, 2),
-                    'required_mutual_questions_count': required_mutual_count,
-                    'user1_required_completeness': round(user1_completeness, 3),
-                    'user2_required_completeness': round(user2_completeness, 3),
-                    'required_completeness_ratio': round(combined_completeness, 3),  # Deprecated
-                })
+            result.update({
+                'required_overall_compatibility': round(required_overall, 2),
+                'required_compatible_with_me': round(required_compatible_with_me, 2),
+                'required_im_compatible_with': round(required_im_compatible_with, 2),
+                'required_mutual_questions_count': required_mutual_count,
+                'user1_required_completeness': round(user1_completeness, 3),
+                'user2_required_completeness': round(user2_completeness, 3),
+                'required_completeness_ratio': round(combined_completeness, 3),
+            })
 
         # Cache the result for 1 hour
         cache.set(cache_key, result, 3600)
@@ -461,10 +440,7 @@ class CompatibilityService:
 
         print(f"   👥 Calculating compatibility with {len(other_users)} other users...", flush=True)
 
-        # Compute total_required_count once for optimization
-        total_required_count = Question.objects.filter(is_required_for_match=True).count()
-
-        # Fetch user answers with question relationship for required filtering
+        # Fetch user answers (required sets come from UserRequiredQuestion)
         user_answers = list(
             user.answers.select_related('question').only(
                 'question_id',
@@ -515,7 +491,6 @@ class CompatibilityService:
                 other_user,
                 user1_answers=user_answers,
                 user2_answers=other_answers_list,
-                total_required_count=total_required_count,
             )
 
             key_direct = (str(user.id), str(other_user.id))

@@ -2,7 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     UserViewSet, TagViewSet, QuestionViewSet, UserAnswerViewSet,
-    CompatibilityViewSet, UserResultViewSet, MessageViewSet,
+    UserRequiredQuestionViewSet, CompatibilityViewSet, UserResultViewSet, MessageViewSet,
     PictureModerationViewSet, UserReportViewSet, UserTagViewSet, StatsViewSet, ControlsViewSet, NotificationViewSet, ConversationViewSet
 )
 from .function_views import (
@@ -14,6 +14,7 @@ router.register(r'users', UserViewSet, basename='user')
 router.register(r'tags', TagViewSet, basename='tag')
 router.register(r'questions', QuestionViewSet, basename='question')
 router.register(r'answers', UserAnswerViewSet, basename='answer')
+router.register(r'user-required-questions', UserRequiredQuestionViewSet, basename='userrequiredquestion')
 router.register(r'compatibility', CompatibilityViewSet, basename='compatibility')
 router.register(r'results', UserResultViewSet, basename='result')
 router.register(r'user-tags', UserTagViewSet, basename='user-tag')

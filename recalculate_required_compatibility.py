@@ -19,7 +19,7 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'mmbackend.settings')
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 django.setup()
 
-from api.models import Compatibility, Question
+from api.models import Compatibility
 from api.services.compatibility_service import CompatibilityService
 
 
@@ -41,11 +41,7 @@ def recalculate_required_compatibility():
         return
 
     print(f"🔄 Recalculating {zero_count} records with missing required compatibility...")
-    print()
-
-    # Get required question count once (for optimization)
-    total_required_count = Question.objects.filter(is_required_for_match=True).count()
-    print(f"ℹ️  Total required questions: {total_required_count}")
+    print("ℹ️  Required sets are now per-user (UserRequiredQuestion)")
     print()
 
     # Process in batches
@@ -64,11 +60,10 @@ def recalculate_required_compatibility():
 
         for comp in batch:
             try:
-                # Recalculate compatibility
+                # Recalculate compatibility (per-user required from UserRequiredQuestion)
                 result = CompatibilityService.calculate_compatibility_between_users(
                     comp.user1,
                     comp.user2,
-                    total_required_count=total_required_count
                 )
 
                 # Update required fields

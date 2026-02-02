@@ -167,7 +167,7 @@ class UserAnswer(models.Model):
     looking_for_open_to_all = models.BooleanField(default=False)
     looking_for_importance = models.PositiveIntegerField(default=1, help_text="Importance level for this answer")
     looking_for_share = models.BooleanField(default=True, help_text="Whether to share this preference")
-    
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
@@ -176,6 +176,22 @@ class UserAnswer(models.Model):
     
     def __str__(self):
         return f"{self.user.username} - {self.question.text[:30]}"
+
+
+class UserRequiredQuestion(models.Model):
+    """Questions a user marks as required for matching (independent of having answered them)."""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='required_questions')
+    question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name='required_by_users')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ['user', 'question']
+        db_table = 'api_userrequiredquestion'
+        verbose_name = 'User required question'
+        verbose_name_plural = 'User required questions'
+
+    def __str__(self):
+        return f"{self.user.username} requires {self.question.text[:30]}"
 
 
 class Compatibility(models.Model):

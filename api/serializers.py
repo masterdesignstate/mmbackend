@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from .models import (
-    User, Tag, Question, UserAnswer, Compatibility,
+    User, Tag, Question, UserAnswer, UserRequiredQuestion, Compatibility,
     UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, QuestionAnswer, Controls, Notification, Conversation
 )
 
@@ -119,12 +119,21 @@ class UserAnswerSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserAnswer
         fields = [
-            'id', 'user', 'question', 'me_answer', 'me_open_to_all', 
-            'me_importance', 'me_share', 'looking_for_answer', 
-            'looking_for_open_to_all', 'looking_for_importance', 
+            'id', 'user', 'question', 'me_answer', 'me_open_to_all',
+            'me_importance', 'me_share', 'looking_for_answer',
+            'looking_for_open_to_all', 'looking_for_importance',
             'looking_for_share', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'user', 'created_at', 'updated_at']
+
+
+class UserRequiredQuestionSerializer(serializers.ModelSerializer):
+    question_id = serializers.UUIDField(source='question.id', read_only=True)
+
+    class Meta:
+        model = UserRequiredQuestion
+        fields = ['id', 'user', 'question', 'question_id', 'created_at']
+        read_only_fields = ['id', 'user', 'created_at']
 
 
 class CompatibilitySerializer(serializers.ModelSerializer):
