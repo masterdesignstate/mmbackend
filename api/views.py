@@ -997,6 +997,31 @@ class UserViewSet(viewsets.ModelViewSet):
             # When current_user is user1: My Required = user2_completeness, Their Required = user1_completeness
             # When current_user is user2: My Required = user1_completeness, Their Required = user2_completeness
 
+            # Compute per-user required mutual counts from UserRequiredQuestion and UserAnswer
+            from .models import UserRequiredQuestion, UserAnswer
+            current_user_id = user_id
+            other_user_id_val = other_user_id
+
+            current_required_qids = set(
+                UserRequiredQuestion.objects.filter(user_id=current_user_id).values_list('question_id', flat=True)
+            )
+            other_required_qids = set(
+                UserRequiredQuestion.objects.filter(user_id=other_user_id_val).values_list('question_id', flat=True)
+            )
+            current_answered_qids = set(
+                UserAnswer.objects.filter(user_id=current_user_id).values_list('question_id', flat=True)
+            )
+            other_answered_qids = set(
+                UserAnswer.objects.filter(user_id=other_user_id_val).values_list('question_id', flat=True)
+            )
+
+            # "My Required" count: how many of MY required questions have BOTH of us answered
+            my_required_mutual = len(current_required_qids & current_answered_qids & other_answered_qids)
+            my_required_total = len(current_required_qids & current_answered_qids)
+            # "Their Required" count: how many of THEIR required questions have BOTH of us answered
+            their_required_mutual = len(other_required_qids & current_answered_qids & other_answered_qids)
+            their_required_total = len(other_required_qids & other_answered_qids)
+
             return Response({
                 'overall_compatibility': compatibility.overall_compatibility,
                 'compatible_with_me': compatibility.compatible_with_me if is_user1 else compatibility.im_compatible_with,
@@ -1007,6 +1032,11 @@ class UserViewSet(viewsets.ModelViewSet):
                 'required_im_compatible_with': compatibility.required_im_compatible_with if is_user1 else compatibility.required_compatible_with_me,
                 'their_required_compatibility': compatibility.their_required_compatibility if is_user1 else compatibility.required_compatible_with_me,
                 'required_mutual_questions_count': compatibility.required_mutual_questions_count,
+                # Per-user required mutual counts for proper X/Y fractions
+                'my_required_mutual_count': my_required_mutual,
+                'my_required_total_count': my_required_total,
+                'their_required_mutual_count': their_required_mutual,
+                'their_required_total_count': their_required_total,
                 # "My Required" = their completeness on MY questions (how many of my Qs did they answer?)
                 # "Their Required" = my completeness on THEIR questions (how many of their Qs did I answer?)
                 # user1_required_completeness in DB = "of user2's Qs, what % did user1 answer"
