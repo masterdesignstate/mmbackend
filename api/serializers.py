@@ -14,6 +14,7 @@ class TagSerializer(serializers.ModelSerializer):
 class UserSerializer(serializers.ModelSerializer):
     online_status = serializers.SerializerMethodField()
     question_answers = serializers.SerializerMethodField()
+    mandatory_questions_complete = serializers.SerializerMethodField()
     date_joined = serializers.DateTimeField(read_only=True)
     is_banned = serializers.BooleanField(read_only=True)
     is_online = serializers.SerializerMethodField()
@@ -24,15 +25,28 @@ class UserSerializer(serializers.ModelSerializer):
             'id', 'username', 'email', 'first_name', 'last_name',
             'profile_photo', 'age', 'date_of_birth', 'height', 'from_location', 'live', 'tagline', 'bio',
             'is_online', 'last_active', 'questions_answered_count', 'online_status', 'question_answers',
-            'date_joined', 'is_banned', 'is_admin'
+            'date_joined', 'is_banned', 'is_admin', 'mandatory_questions_complete'
         ]
         read_only_fields = [
             'id', 'last_active', 'questions_answered_count',
-            'date_joined', 'is_banned', 'is_admin'
+            'date_joined', 'is_banned', 'is_admin', 'mandatory_questions_complete'
         ]
 
     def get_is_online(self, obj):
         return obj.is_online
+
+    def get_mandatory_questions_complete(self, obj):
+        mandatory_numbers = set(
+            Question.objects.filter(is_mandatory=True).values_list('question_number', flat=True)
+        )
+        if not mandatory_numbers:
+            return True
+        answered_numbers = set(
+            UserAnswer.objects.filter(
+                user=obj, question__is_mandatory=True
+            ).values_list('question__question_number', flat=True)
+        )
+        return len(answered_numbers) >= len(mandatory_numbers)
 
     def get_online_status(self, obj):
         # Check if user is authenticated and not AnonymousUser
