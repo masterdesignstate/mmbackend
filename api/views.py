@@ -75,8 +75,9 @@ class UserViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def online(self, request):
-        """Get online users"""
-        online_users = self.get_queryset().filter(is_online=True)
+        """Get online users (active within last 5 minutes)"""
+        five_minutes_ago = timezone.now() - timedelta(minutes=5)
+        online_users = self.get_queryset().filter(last_active__gte=five_minutes_ago)
         serializer = self.get_serializer(online_users, many=True)
         return Response(serializer.data)
 
@@ -1022,6 +1023,12 @@ class UserViewSet(viewsets.ModelViewSet):
             their_required_mutual = len(other_required_qids & current_answered_qids & other_answered_qids)
             their_required_total = len(other_required_qids & other_answered_qids)
 
+            # Compute completeness percentages live instead of reading stale stored values
+            # "Their Required" completeness = of THEIR required (that they answered), what % did I answer?
+            live_their_completeness = (their_required_mutual / their_required_total) if their_required_total > 0 else (1.0 if len(other_required_qids) == 0 else 0.0)
+            # "My Required" completeness = of MY required (that I answered), what % did THEY answer?
+            live_my_completeness = (my_required_mutual / my_required_total) if my_required_total > 0 else (1.0 if len(current_required_qids) == 0 else 0.0)
+
             return Response({
                 'overall_compatibility': compatibility.overall_compatibility,
                 'compatible_with_me': compatibility.compatible_with_me if is_user1 else compatibility.im_compatible_with,
@@ -1037,13 +1044,11 @@ class UserViewSet(viewsets.ModelViewSet):
                 'my_required_total_count': my_required_total,
                 'their_required_mutual_count': their_required_mutual,
                 'their_required_total_count': their_required_total,
+                # Live-computed completeness percentages
                 # "My Required" = their completeness on MY questions (how many of my Qs did they answer?)
                 # "Their Required" = my completeness on THEIR questions (how many of their Qs did I answer?)
-                # user1_required_completeness in DB = "of user2's Qs, what % did user1 answer"
-                # user2_required_completeness in DB = "of user1's Qs, what % did user2 answer"
-                # So for display: My Required = user2 (their coverage of my Qs), Their Required = user1 (my coverage of their Qs)
-                'user1_required_completeness': compatibility.user2_required_completeness if is_user1 else compatibility.user1_required_completeness,
-                'user2_required_completeness': compatibility.user1_required_completeness if is_user1 else compatibility.user2_required_completeness,
+                'user1_required_completeness': live_my_completeness,
+                'user2_required_completeness': live_their_completeness,
             })
         except Exception as e:
             logger.error(f"Error getting compatibility: {e}")
@@ -1948,6 +1953,51 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
             return Response(serializer.data)
         return Response({'error': 'question_id parameter required'}, status=400)
 
+    @action(detail=False, methods=['post'])
+    def undo_question(self, request):
+        """Delete all answers for a specific question_number for a user (non-mandatory only)"""
+        user_id = request.data.get('user_id')
+        question_number = request.data.get('question_number')
+
+        if not user_id or question_number is None:
+            return Response({'error': 'user_id and question_number are required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Check that the question exists and is not mandatory
+        questions_for_number = Question.objects.filter(question_number=question_number)
+        if not questions_for_number.exists():
+            return Response({'error': 'Question not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if questions_for_number.filter(is_mandatory=True).exists():
+            return Response({'error': 'Cannot undo mandatory questions'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Delete all answers for this question_number
+        answers = UserAnswer.objects.filter(user=user, question__question_number=question_number)
+        deleted_count = answers.count()
+        answers.delete()
+
+        # Clean up UserRequiredQuestion for these questions
+        UserRequiredQuestion.objects.filter(user=user, question__question_number=question_number).delete()
+
+        # Recount distinct answered question numbers
+        actual_count = UserAnswer.objects.filter(user=user).values('question__question_number').distinct().count()
+        User.objects.filter(id=user.id).update(questions_answered_count=actual_count)
+        user.refresh_from_db()
+
+        # Trigger compatibility recalculation
+        if (user.questions_answered_count or 0) >= MIN_MATCHABLE_ANSWERS:
+            enqueue_user_for_recalculation(user, force=True)
+            try:
+                CompatibilityService.recalculate_all_compatibilities(user, use_full_reset=False)
+            except Exception as exc:
+                logger.exception("Compatibility recompute failed after undo for user %s: %s", user.id, exc)
+
+        return Response({'deleted_count': deleted_count, 'questions_answered_count': user.questions_answered_count})
+
 
 class UserRequiredQuestionViewSet(viewsets.ModelViewSet):
     """List/add/remove questions a user marks as required for matching (independent of having answered)."""
@@ -1981,11 +2031,27 @@ class UserRequiredQuestionViewSet(viewsets.ModelViewSet):
         except Question.DoesNotExist:
             return Response({'error': 'Question not found'}, status=status.HTTP_404_NOT_FOUND)
         obj, created = UserRequiredQuestion.objects.get_or_create(user=user, question=question)
+
+        # Trigger recalculation since required set changed
+        if created and (user.questions_answered_count or 0) >= MIN_MATCHABLE_ANSWERS:
+            enqueue_user_for_recalculation(user, force=True)
+            try:
+                CompatibilityService.recalculate_all_compatibilities(user, use_full_reset=False)
+            except Exception:
+                logger.exception("Required question recalc failed for user %s", user.id)
+
         serializer = self.get_serializer(obj)
         return Response(serializer.data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
     def perform_destroy(self, instance):
+        user = instance.user
         instance.delete()
+        if (user.questions_answered_count or 0) >= MIN_MATCHABLE_ANSWERS:
+            enqueue_user_for_recalculation(user, force=True)
+            try:
+                CompatibilityService.recalculate_all_compatibilities(user, use_full_reset=False)
+            except Exception:
+                logger.exception("Required question removal recalc failed for user %s", user.id)
 
 
 class CompatibilityViewSet(viewsets.ReadOnlyModelViewSet):

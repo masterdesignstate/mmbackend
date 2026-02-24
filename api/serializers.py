@@ -16,7 +16,7 @@ class UserSerializer(serializers.ModelSerializer):
     question_answers = serializers.SerializerMethodField()
     date_joined = serializers.DateTimeField(read_only=True)
     is_banned = serializers.BooleanField(read_only=True)
-    is_online = serializers.BooleanField(read_only=True)
+    is_online = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -27,9 +27,12 @@ class UserSerializer(serializers.ModelSerializer):
             'date_joined', 'is_banned', 'is_admin'
         ]
         read_only_fields = [
-            'id', 'is_online', 'last_active', 'questions_answered_count',
+            'id', 'last_active', 'questions_answered_count',
             'date_joined', 'is_banned', 'is_admin'
         ]
+
+    def get_is_online(self, obj):
+        return obj.is_online
 
     def get_online_status(self, obj):
         # Check if user is authenticated and not AnonymousUser
@@ -251,7 +254,7 @@ class DetailedQuestionSerializer(QuestionSerializer):
 # Lightweight serializers for compatibility endpoint (no circular references)
 class SimpleUserSerializer(serializers.ModelSerializer):
     """Lightweight user serializer for compatibility lists - no nested data"""
-    is_online = serializers.BooleanField(read_only=True)
+    is_online = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -260,6 +263,9 @@ class SimpleUserSerializer(serializers.ModelSerializer):
             'profile_photo', 'age', 'date_of_birth', 'height',
             'from_location', 'live', 'tagline', 'bio', 'is_online', 'last_active'
         ]
+
+    def get_is_online(self, obj):
+        return obj.is_online
 
 class CompactCompatibilityResultSerializer(serializers.Serializer):
     """Lightweight compatibility data serializer"""
