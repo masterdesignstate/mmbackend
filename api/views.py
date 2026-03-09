@@ -1819,6 +1819,11 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
         if user_id:
             queryset = queryset.filter(user_id=user_id)
 
+        # Filter by question_number so the detail page can fetch only relevant answers
+        question_number = self.request.query_params.get('question_number')
+        if question_number:
+            queryset = queryset.filter(question__question_number=question_number)
+
         return queryset
 
     @action(detail=False, methods=['get'], url_path='my_answered_questions')
