@@ -239,8 +239,14 @@ def user_personal_details(request):
 
         if has_restricted:
             print(f"❌ Restricted words found: {found_words}")
+            # Auto-restrict the user for TOS violation
+            user.is_banned = True
+            user.ban_reason = f'Restricted words detected in profile: {", ".join(found_words)}'
+            user.ban_date = timezone.now()
+            user.save(update_fields=['is_banned', 'ban_reason', 'ban_date'])
             return JsonResponse({
-                'error': f'Your profile contains restricted words: {", ".join(found_words)}'
+                'error': f'Your profile contains restricted words: {", ".join(found_words)}',
+                'is_banned': True
             }, status=400)
 
         print(f"✅ No restricted words found in profile fields")

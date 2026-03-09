@@ -1280,8 +1280,21 @@ class QuestionViewSet(viewsets.ModelViewSet):
             )
 
             if has_restricted:
+                # Auto-restrict the submitting user for TOS violation
+                if user_id:
+                    try:
+                        from django.contrib.auth import get_user_model
+                        RestrictUser = get_user_model()
+                        submitter = RestrictUser.objects.get(id=user_id)
+                        submitter.is_banned = True
+                        submitter.ban_reason = f'Restricted words in question: {", ".join(found_words)}'
+                        submitter.ban_date = timezone.now()
+                        submitter.save(update_fields=['is_banned', 'ban_reason', 'ban_date'])
+                    except RestrictUser.DoesNotExist:
+                        pass
                 return Response({
-                    'error': f'Your question contains restricted words: {", ".join(found_words)}'
+                    'error': f'Your question contains restricted words: {", ".join(found_words)}',
+                    'is_banned': True
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             if not tags:
@@ -1855,7 +1868,10 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
             is_required_for_me = request.data.get('is_required_for_me', False)
 
             # Sync UserRequiredQuestion (required for me is stored there; user can require without answering)
-            if is_required_for_me:
+            # Mandatory questions are always required — don't allow un-requiring them
+            if question.is_mandatory:
+                UserRequiredQuestion.objects.get_or_create(user=user, question=question)
+            elif is_required_for_me:
                 UserRequiredQuestion.objects.get_or_create(user=user, question=question)
             else:
                 UserRequiredQuestion.objects.filter(user=user, question=question).delete()
