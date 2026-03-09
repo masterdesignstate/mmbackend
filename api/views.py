@@ -1808,19 +1808,31 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
     ordering = ['-created_at']
 
     def get_queryset(self):
-        queryset = UserAnswer.objects.all()
-        
+        queryset = UserAnswer.objects.select_related(
+            'question', 'user', 'question__submitted_by'
+        ).prefetch_related(
+            'question__tags', 'question__answers'
+        )
+
         # Filter by user if user parameter is provided
         user_id = self.request.query_params.get('user')
         if user_id:
             queryset = queryset.filter(user_id=user_id)
-        
-        print(f"UserAnswerViewSet.get_queryset() called. Request: {self.request.method} {self.request.path}")
-        print(f"Query params: {self.request.query_params}")
-        print(f"User filter: {user_id}")
-        print(f"Returning {queryset.count()} answers")
-        
+
         return queryset
+
+    @action(detail=False, methods=['get'], url_path='my_answered_questions')
+    def my_answered_questions(self, request):
+        """Lightweight endpoint: returns only the question numbers a user has answered."""
+        user_id = request.query_params.get('user')
+        if not user_id:
+            return Response({'answered_question_numbers': []})
+        numbers = list(
+            UserAnswer.objects.filter(user_id=user_id)
+            .values_list('question__question_number', flat=True)
+            .distinct()
+        )
+        return Response({'answered_question_numbers': sorted(numbers)})
 
     def create(self, request, *args, **kwargs):
         """
