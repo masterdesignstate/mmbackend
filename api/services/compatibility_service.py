@@ -159,11 +159,14 @@ class CompatibilityService:
         else:
             overall_compatibility = 0.0
 
+        # Count by distinct question_number (grouped questions = 1, not N sub-questions)
+        mutual_question_numbers = {a1_map[qid].question.question_number for qid in mutual_question_ids}
+
         return (
             round(direction_a_percentage, 2),
             round(direction_b_percentage, 2),
             round(overall_compatibility, 2),
-            len(mutual_question_ids)
+            len(mutual_question_numbers)
         )
 
     @staticmethod
