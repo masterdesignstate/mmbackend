@@ -641,13 +641,21 @@ def check_onboarding_status(request):
             .values_list('question_id', flat=True)
         )
         has_gender_preferences = len(answered_question_ids) >= min(10, len(mandatory_question_ids))
-        
+
+        # Compute which mandatory question_numbers user has already answered (distinct)
+        answered_mandatory_numbers = sorted(
+            UserAnswer.objects.filter(user=user, question_id__in=mandatory_question_ids)
+            .values_list('question__question_number', flat=True)
+            .distinct()
+        )
+
         print(f"📊 Onboarding status:")
         print(f"   Personal details: {'✅' if has_personal_details else '❌'}")
         print(f"   Profile photo: {'✅' if has_profile_photo else '❌'}")
         print(f"   Mandatory questions: {len(answered_question_ids)}/{len(mandatory_question_ids)} answered")
+        print(f"   Answered question numbers: {answered_mandatory_numbers}")
         print(f"   Questions complete: {'✅' if has_gender_preferences else '❌'}")
-        
+
         # Determine which step user should be on
         if not has_personal_details:
             step = 'personal_details'
@@ -659,16 +667,16 @@ def check_onboarding_status(request):
             progress = 15
         elif not has_gender_preferences:
             step = 'gender'
-            step_url = '/auth/gender'
+            step_url = '/auth/introcard'
             progress = 25
         else:
             step = 'complete'
             step_url = '/dashboard'
             progress = 100
-        
+
         print(f"🎯 User should go to step: {step} ({step_url})")
         print(f"📈 Progress: {progress}%")
-        
+
         response_data = {
             'step': step,
             'step_url': step_url,
@@ -677,7 +685,8 @@ def check_onboarding_status(request):
             'has_profile_photo': has_profile_photo,
             'has_gender_preferences': has_gender_preferences,
             'user_id': str(user.id),
-            'is_admin': is_admin_user
+            'is_admin': is_admin_user,
+            'answered_mandatory_numbers': answered_mandatory_numbers
         }
         
         print(f"📤 Sending response: {response_data}")
