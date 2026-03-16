@@ -14,7 +14,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'mmbackend.settings')
 django.setup()
 
-from api.models import User, Question, UserAnswer
+from api.models import User, Question, UserAnswer, UserRequiredQuestion
 
 # Profile picture sets for different types
 FEMALE_PHOTOS = [
@@ -365,6 +365,9 @@ def create_dummy_users(count=100):
                 looking_for_open_to_all=answer_data['looking_for_open_to_all'],
                 looking_for_share=True
             )
+            # Ensure mandatory questions are marked as required
+            if question.is_mandatory:
+                UserRequiredQuestion.objects.get_or_create(user=user, question=question)
             answers_created += 1
 
         created_users.append(user)

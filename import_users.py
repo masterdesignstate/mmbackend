@@ -732,6 +732,10 @@ def generate_user_answers(user, questions, answer_templates):
             looking_for_multiplier=random.choice([1, 2, 3]),
             looking_for_share=True
         )
+        # Ensure mandatory questions are marked as required
+        if question.is_mandatory:
+            from api.models import UserRequiredQuestion
+            UserRequiredQuestion.objects.get_or_create(user=user, question=question)
 
 def import_users_from_json():
     """Import users from the JSON file"""
