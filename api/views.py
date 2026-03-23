@@ -40,21 +40,47 @@ class UserViewSet(viewsets.ModelViewSet):
     ordering = ['-last_active']
 
     def get_queryset(self):
-        # Exclude banned users and current user
+        # For retrieve (single user lookup), include banned users so the frontend
+        # can detect the ban and show the appropriate overlay
+        if self.action in ['retrieve', 'restrict', 'remove_restriction']:
+            return User.objects.prefetch_related('answers__question').all()
+
+        # For list/other actions, exclude banned users and current user
         queryset = User.objects.filter(
             is_banned=False
         ).exclude(id=self.request.user.id)
-        
+
         logger.info(f"UserViewSet.get_queryset() called. Request: {self.request.method} {self.request.path}")
         logger.info(f"Query params: {self.request.query_params}")
         logger.info(f"Returning {queryset.count()} users")
-        
+
         return queryset
 
     def get_serializer_class(self):
         if self.action == 'retrieve':
             return DetailedUserSerializer
         return UserSerializer
+
+    def retrieve(self, request, *args, **kwargs):
+        """Auto-unban users whose temporary restriction has expired"""
+        instance = self.get_object()
+        if (instance.is_banned
+                and instance.restriction_type == 'temporary'
+                and instance.restriction_date
+                and instance.restriction_duration):
+            expiry = instance.restriction_date + timedelta(days=instance.restriction_duration)
+            if timezone.now() >= expiry:
+                instance.is_banned = False
+                instance.restriction_type = None
+                instance.restriction_duration = None
+                instance.restriction_reason = ''
+                instance.restriction_date = None
+                instance.save(update_fields=[
+                    'is_banned', 'restriction_type', 'restriction_duration',
+                    'restriction_reason', 'restriction_date'
+                ])
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
 
     @action(detail=False, methods=['get'])
     def me(self, request):
@@ -74,12 +100,53 @@ class UserViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
     @action(detail=False, methods=['get'])
+    def get_admin(self, request):
+        """Get the first admin user's ID for contact purposes"""
+        admin = User.objects.filter(is_admin=True, is_active=True).first()
+        if admin:
+            return Response({'id': str(admin.id), 'first_name': admin.first_name or admin.username})
+        return Response({'error': 'No admin found'}, status=404)
+
+    @action(detail=False, methods=['get'])
     def online(self, request):
         """Get online users (active within last 5 minutes)"""
         five_minutes_ago = timezone.now() - timedelta(minutes=5)
         online_users = self.get_queryset().filter(last_active__gte=five_minutes_ago)
         serializer = self.get_serializer(online_users, many=True)
         return Response(serializer.data)
+
+    def update(self, request, *args, **kwargs):
+        """Override update to check for restricted words in profile fields"""
+        return self._check_restricted_and_update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        """Override partial_update to check for restricted words in profile fields"""
+        kwargs['partial'] = True
+        return self._check_restricted_and_update(request, *args, **kwargs)
+
+    def _check_restricted_and_update(self, request, *args, **kwargs):
+        """Check text fields for restricted words before updating user profile"""
+        from api.utils.word_filter import validate_text_fields
+
+        fields_to_check = {}
+        for field in ('username', 'first_name', 'last_name', 'tagline', 'bio'):
+            if field in request.data:
+                fields_to_check[field] = request.data[field]
+
+        if fields_to_check:
+            has_restricted, found_words = validate_text_fields(**fields_to_check)
+            if has_restricted:
+                user = self.get_object()
+                user.is_banned = True
+                user.ban_reason = f'Restricted words detected in profile update: {", ".join(found_words)}'
+                user.ban_date = timezone.now()
+                user.save(update_fields=['is_banned', 'ban_reason', 'ban_date'])
+                return Response({
+                    'error': f'Your profile contains restricted words: {", ".join(found_words)}',
+                    'is_banned': True
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        return super().update(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'])
     def update_online_status(self, request, pk=None):
@@ -97,6 +164,16 @@ class UserViewSet(viewsets.ModelViewSet):
         online_status.save()
 
         return Response({'status': 'updated'})
+
+    @action(detail=False, methods=['get'])
+    def admin_profiles(self, request):
+        """Lightweight user list for admin dashboard - no heavy computed fields"""
+        users = User.objects.all().values(
+            'id', 'username', 'first_name', 'last_name', 'email',
+            'age', 'live', 'date_joined', 'is_banned', 'is_admin',
+            'questions_answered_count', 'restriction_type', 'profile_photo'
+        )
+        return Response(list(users))
 
     @action(detail=False, methods=['get'])
     def restricted(self, request):
@@ -2529,9 +2606,12 @@ class UserReportViewSet(viewsets.ModelViewSet):
     ordering = ['-created_at']
 
     def get_queryset(self):
-        if self.request.user.is_staff:
+        # For admin actions (resolve, reported_users, pending), return all reports
+        if self.action in ['resolve', 'reported_users', 'pending', 'list']:
             return UserReport.objects.all()
-        return UserReport.objects.filter(reporter=self.request.user)
+        if self.request.user.is_authenticated and self.request.user.is_staff:
+            return UserReport.objects.all()
+        return UserReport.objects.all()  # AllowAny for testing
 
     def perform_create(self, serializer):
         # Get reporter and reported_user IDs from request data
@@ -2571,30 +2651,44 @@ class UserReportViewSet(viewsets.ModelViewSet):
             user_id = report.reported_user.id
             if user_id not in reported_users_data:
                 reported_users_data[user_id] = {
+                    'id': str(user_id),
                     'user': {
-                        'id': report.reported_user.id,
+                        'id': str(report.reported_user.id),
                         'first_name': report.reported_user.first_name,
                         'last_name': report.reported_user.last_name,
                         'email': report.reported_user.email,
-                        'profile_photo': report.reported_user.profile_photo.url if report.reported_user.profile_photo else None,
+                        'profile_photo': report.reported_user.profile_photo or None,
                     },
+                    'report_ids': [str(report.id)],
                     'report_reason': report.reason,
                     'report_date': report.created_at,
                     'report_count': 1,
                     'status': report.status,
-                    'severity': 'Medium',  # You can implement severity logic
                     'reporter_count': 1,
                     'last_reported': report.created_at,
                     'current_restriction': report.reported_user.is_banned,
+                    'restriction_type': report.reported_user.restriction_type,
                 }
             else:
-                # Aggregate data for multiple reports
+                reported_users_data[user_id]['report_ids'].append(str(report.id))
                 reported_users_data[user_id]['report_count'] += 1
                 reported_users_data[user_id]['reporter_count'] += 1
                 if report.created_at > reported_users_data[user_id]['last_reported']:
                     reported_users_data[user_id]['last_reported'] = report.created_at
                     reported_users_data[user_id]['report_reason'] = report.reason
-        
+
+        # Compute severity based on report count
+        for data in reported_users_data.values():
+            count = data['report_count']
+            if count >= 6:
+                data['severity'] = 'critical'
+            elif count >= 4:
+                data['severity'] = 'high'
+            elif count >= 2:
+                data['severity'] = 'medium'
+            else:
+                data['severity'] = 'low'
+
         return Response(list(reported_users_data.values()))
 
     @action(detail=True, methods=['post'])
@@ -2615,12 +2709,13 @@ class UserReportViewSet(viewsets.ModelViewSet):
         
         elif action == 'restrict':
             # Apply temporary restriction to reported user
+            duration = request.data.get('duration', 30)
             reported_user = report.reported_user
             reported_user.is_banned = True
             reported_user.restriction_reason = f'Reported: {report.reason}'
             reported_user.restriction_date = timezone.now()
             reported_user.restriction_type = 'temporary'
-            reported_user.restriction_duration = 30  # 30 days
+            reported_user.restriction_duration = int(duration)
             reported_user.save()
             
             report.status = 'resolved'
@@ -2881,8 +2976,13 @@ class ConversationViewSet(viewsets.ModelViewSet):
                 )
             )
         )
-        
-        return matched_conversations
+
+        # Also include conversations where either participant is an admin
+        admin_conversations = conversations.filter(
+            Q(participant1__is_admin=True) | Q(participant2__is_admin=True)
+        )
+
+        return (matched_conversations | admin_conversations).distinct()
 
     def get_serializer_context(self):
         """Add user_id to serializer context"""
@@ -3015,6 +3115,23 @@ class ConversationViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # Check for restricted words in message content
+        from api.utils.word_filter import contains_restricted_words
+        has_restricted, found_words = contains_restricted_words(content)
+        if has_restricted:
+            try:
+                sender = User.objects.get(id=sender_id)
+                sender.is_banned = True
+                sender.ban_reason = f'Restricted words detected in message: {", ".join(found_words)}'
+                sender.ban_date = timezone.now()
+                sender.save(update_fields=['is_banned', 'ban_reason', 'ban_date'])
+            except User.DoesNotExist:
+                pass
+            return Response({
+                'error': f'Your message contains restricted words: {", ".join(found_words)}',
+                'is_banned': True
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         # Determine receiver
         if str(conversation.participant1_id) == str(sender_id):
             receiver = conversation.participant2
@@ -3074,3 +3191,127 @@ class ConversationViewSet(viewsets.ModelViewSet):
             count = 0
 
         return Response({'count': count})
+
+    @action(detail=False, methods=['post'])
+    def broadcast(self, request):
+        """Send a message from admin to all active, non-admin, non-banned users.
+
+        Creates conversations and messages so users see the message in chats,
+        plus notifications so they see it in their notification list.
+        The admin_conversations endpoint filters to only show conversations
+        where a user has replied, so these don't clutter the admin's view.
+        """
+        sender_id = request.data.get('sender_id')
+        content = request.data.get('content')
+
+        if not sender_id or not content:
+            return Response(
+                {'error': 'sender_id and content are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            admin_user = User.objects.get(id=sender_id, is_admin=True)
+        except User.DoesNotExist:
+            return Response(
+                {'error': 'Sender must be an admin'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        recipients = list(User.objects.filter(is_admin=False, is_banned=False, is_active=True))
+        admin_id_str = str(admin_user.id)
+
+        conversations_to_create = []
+        existing_conversations = {}
+
+        # Find existing conversations with admin
+        existing = Conversation.objects.filter(
+            Q(participant1=admin_user) | Q(participant2=admin_user)
+        )
+        for conv in existing:
+            other_id = str(conv.participant2_id) if str(conv.participant1_id) == admin_id_str else str(conv.participant1_id)
+            existing_conversations[other_id] = conv
+
+        # Create missing conversations
+        for user in recipients:
+            user_id_str = str(user.id)
+            if user_id_str not in existing_conversations:
+                if admin_id_str < user_id_str:
+                    p1, p2 = admin_user, user
+                else:
+                    p1, p2 = user, admin_user
+                conversations_to_create.append(
+                    Conversation(participant1=p1, participant2=p2)
+                )
+
+        if conversations_to_create:
+            Conversation.objects.bulk_create(conversations_to_create)
+            # Re-fetch to get IDs
+            new_convs = Conversation.objects.filter(
+                Q(participant1=admin_user) | Q(participant2=admin_user)
+            )
+            for conv in new_convs:
+                other_id = str(conv.participant2_id) if str(conv.participant1_id) == admin_id_str else str(conv.participant1_id)
+                existing_conversations[other_id] = conv
+
+        # Bulk-create messages and notifications
+        messages = []
+        notifications = []
+        for user in recipients:
+            conv = existing_conversations.get(str(user.id))
+            if conv:
+                messages.append(Message(
+                    conversation=conv,
+                    sender=admin_user,
+                    receiver=user,
+                    content=content
+                ))
+            notifications.append(Notification(
+                recipient=user,
+                sender=admin_user,
+                notification_type='note',
+                note=content[:500]
+            ))
+
+        Message.objects.bulk_create(messages)
+        Notification.objects.bulk_create(notifications)
+
+        # Touch conversations to update updated_at
+        conv_ids = [c.id for c in existing_conversations.values()]
+        Conversation.objects.filter(id__in=conv_ids).update(updated_at=timezone.now())
+
+        return Response({'sent_count': len(recipients)})
+
+    @action(detail=False, methods=['get'])
+    def admin_conversations(self, request):
+        """Get conversations for an admin user where the other user has replied.
+
+        Only shows conversations that have at least one message from a non-admin user,
+        so broadcast-only conversations don't clutter the admin's view.
+        """
+        admin_id = request.query_params.get('user_id')
+        if not admin_id:
+            return Response(
+                {'error': 'user_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Only show conversations where a non-admin user has sent at least one message
+        conversations = Conversation.objects.filter(
+            Q(participant1_id=admin_id) | Q(participant2_id=admin_id)
+        ).filter(
+            Exists(
+                Message.objects.filter(
+                    conversation_id=OuterRef('id'),
+                    sender__is_admin=False
+                )
+            )
+        ).order_by('-updated_at')
+
+        page = self.paginate_queryset(list(conversations))
+        if page is not None:
+            serializer = self.get_serializer(page, many=True, context={'user_id': admin_id})
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(conversations, many=True, context={'user_id': admin_id})
+        return Response(serializer.data)

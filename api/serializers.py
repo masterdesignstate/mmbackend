@@ -25,11 +25,13 @@ class UserSerializer(serializers.ModelSerializer):
             'id', 'username', 'email', 'first_name', 'last_name',
             'profile_photo', 'age', 'date_of_birth', 'height', 'from_location', 'live', 'tagline', 'bio',
             'is_online', 'last_active', 'questions_answered_count', 'online_status', 'question_answers',
-            'date_joined', 'is_banned', 'is_admin', 'mandatory_questions_complete'
+            'date_joined', 'is_banned', 'is_admin', 'mandatory_questions_complete',
+            'restriction_type', 'restriction_duration', 'restriction_reason', 'restriction_date'
         ]
         read_only_fields = [
             'id', 'last_active', 'questions_answered_count',
-            'date_joined', 'is_banned', 'is_admin', 'mandatory_questions_complete'
+            'date_joined', 'is_banned', 'is_admin', 'mandatory_questions_complete',
+            'restriction_type', 'restriction_duration', 'restriction_reason', 'restriction_date'
         ]
 
     def get_is_online(self, obj):
@@ -129,19 +131,31 @@ class QuestionSerializer(serializers.ModelSerializer):
         return False
 
 
+class LightQuestionSerializer(serializers.ModelSerializer):
+    """Lightweight question serializer - no nested tags, answers, or submitted_by"""
+    class Meta:
+        model = Question
+        fields = [
+            'id', 'question_name', 'question_number', 'group_number', 'group_name',
+            'group_name_text', 'question_type', 'text', 'is_required_for_match',
+            'is_mandatory', 'skip_me', 'skip_looking_for', 'open_to_all_me',
+            'open_to_all_looking_for', 'is_group'
+        ]
+
+
 class UserAnswerSerializer(serializers.ModelSerializer):
-    question = QuestionSerializer(read_only=True)
-    user = UserSerializer(read_only=True)
-    
+    question = LightQuestionSerializer(read_only=True)
+    user_id = serializers.UUIDField(source='user.id', read_only=True)
+
     class Meta:
         model = UserAnswer
         fields = [
-            'id', 'user', 'question', 'me_answer', 'me_open_to_all',
+            'id', 'user_id', 'question', 'me_answer', 'me_open_to_all',
             'me_importance', 'me_share', 'looking_for_answer',
             'looking_for_open_to_all', 'looking_for_importance',
             'looking_for_share', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'user', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'user_id', 'created_at', 'updated_at']
 
 
 class UserRequiredQuestionSerializer(serializers.ModelSerializer):
@@ -275,7 +289,7 @@ class SimpleUserSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name',
             'profile_photo', 'age', 'date_of_birth', 'height',
-            'from_location', 'live', 'tagline', 'bio', 'is_online', 'last_active'
+            'from_location', 'live', 'tagline', 'bio', 'is_online', 'last_active', 'is_admin'
         ]
 
     def get_is_online(self, obj):
