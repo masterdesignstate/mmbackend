@@ -668,15 +668,18 @@ class UserViewSet(viewsets.ModelViewSet):
 
             if apply_required_filter:
                 print(f"🔍 [required] ENTERING required_filter path: required_scope={required_scope!r}")
+
+                # Filter out banned users at queryset level
+                compatibilities = compatibilities.exclude(
+                    Q(user1=request.user, user2__is_banned=True) |
+                    Q(user2=request.user, user1__is_banned=True)
+                )
+
                 compatibility_results = []
 
                 for comp in compatibilities:
                     # Determine which user is the "other" user
                     other_user = comp.user2 if comp.user1 == request.user else comp.user1
-
-                    # Skip banned users
-                    if other_user.is_banned:
-                        continue
 
                     compatibility_results.append({
                         'user': other_user,
@@ -981,7 +984,12 @@ class UserViewSet(viewsets.ModelViewSet):
                     'message': f'Showing {len(response_data)} users from {total_users} total ranked by compatibility'
                 })
 
-            # Check if we have sufficient pre-calculated data
+            # Filter out banned users BEFORE pagination so we always get a full page
+            compatibilities = compatibilities.exclude(
+                Q(user1=request.user, user2__is_banned=True) |
+                Q(user2=request.user, user1__is_banned=True)
+            )
+
             total_compatibilities = compatibilities.count()
 
             # Use pre-calculated results
@@ -992,10 +1000,6 @@ class UserViewSet(viewsets.ModelViewSet):
             for comp in paginated_compatibilities:
                 # Determine which user is the "other" user
                 other_user = comp.user2 if comp.user1 == request.user else comp.user1
-
-                # Skip banned users
-                if other_user.is_banned:
-                    continue
 
                 user_serializer = SimpleUserSerializer(other_user)
                 is_user1 = comp.user1 == request.user
