@@ -238,11 +238,16 @@ class UserReportSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserReport
         fields = [
-            'id', 'reporter', 'reported_user', 'reason', 'evidence',
+            'id', 'reporter', 'reported_user', 'reason_category', 'reason', 'evidence',
             'status', 'moderator_notes', 'created_at', 'resolved_at', 'resolved_by'
         ]
-        read_only_fields = ['id', 'reporter', 'status', 'moderator_notes', 
+        read_only_fields = ['id', 'reporter', 'status', 'moderator_notes',
                            'created_at', 'resolved_at', 'resolved_by']
+
+    def validate(self, data):
+        if data.get('reason_category') == 'other' and not data.get('reason', '').strip():
+            raise serializers.ValidationError({'reason': 'Please provide details for "Other" reports.'})
+        return data
 
 
 class UserOnlineStatusSerializer(serializers.ModelSerializer):

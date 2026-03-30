@@ -377,11 +377,24 @@ class UserReport(models.Model):
         ('resolved', 'Resolved'),
         ('dismissed', 'Dismissed'),
     ]
-    
+
+    REASON_CATEGORY_CHOICES = [
+        ('fake_profile', 'Fake Profile'),
+        ('inappropriate_photos', 'Inappropriate Photos'),
+        ('harassment', 'Harassment'),
+        ('spam', 'Spam'),
+        ('offensive_language', 'Offensive Language'),
+        ('scam_fraud', 'Scam / Fraud'),
+        ('underage_user', 'Underage User'),
+        ('other', 'Other'),
+        ('admin_restriction', 'Admin Restriction'),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     reporter = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reports_made')
     reported_user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reports_received')
-    reason = models.TextField()
+    reason_category = models.CharField(max_length=30, choices=REASON_CATEGORY_CHOICES, default='other')
+    reason = models.TextField(blank=True)
     evidence = models.TextField(blank=True, help_text="Additional evidence or context")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     moderator_notes = models.TextField(blank=True)

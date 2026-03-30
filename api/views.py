@@ -167,22 +167,26 @@ class UserViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def admin_profiles(self, request):
-        """Lightweight user list for admin dashboard - no heavy computed fields"""
-        users = User.objects.all().values(
+        """Lightweight user list for admin dashboard"""
+        users = User.objects.all().annotate(
+            has_pending_reports=Exists(
+                UserReport.objects.filter(
+                    reported_user_id=OuterRef('id'),
+                    status='pending'
+                )
+            )
+        ).values(
             'id', 'username', 'first_name', 'last_name', 'email',
             'age', 'live', 'date_joined', 'is_banned', 'is_admin',
-            'questions_answered_count', 'restriction_type', 'profile_photo'
+            'questions_answered_count', 'restriction_type', 'profile_photo',
+            'has_pending_reports'
         )
+
         return Response(list(users))
 
     @action(detail=False, methods=['get'])
     def restricted(self, request):
-        """Get restricted users (admin only)"""
-        # Removed staff requirement for testing
-        # if not request.user.is_staff:
-        #     return Response({'error': 'Staff only'}, status=403)
-        
-        # Get users with restrictions (you can add restriction logic here)
+        """Get restricted users (admin only) - all banned/restricted users"""
         restricted_users = User.objects.filter(is_banned=True)
         serializer = self.get_serializer(restricted_users, many=True)
         return Response(serializer.data)
@@ -211,8 +215,8 @@ class UserViewSet(viewsets.ModelViewSet):
         user = self.get_object()
         restriction_type = request.data.get('restriction_type', 'temporary')
         duration = request.data.get('duration', 30)
-        reason = request.data.get('reason', '')
-        
+        reason = request.data.get('reason', 'admin_restriction')
+
         user.is_banned = True
         user.restriction_type = restriction_type
         user.restriction_duration = duration
@@ -233,10 +237,16 @@ class UserViewSet(viewsets.ModelViewSet):
         user.is_banned = False
         user.restriction_type = None
         user.restriction_duration = None
-        user.restriction_reason = None
+        user.restriction_reason = ''
         user.restriction_date = None
         user.save()
-        
+
+        # Also dismiss any pending reports for this user
+        UserReport.objects.filter(
+            reported_user=user,
+            status='pending'
+        ).update(status='dismissed', resolved_at=timezone.now())
+
         return Response({'status': 'restriction removed'})
 
     @action(detail=False, methods=['get'])
@@ -341,7 +351,7 @@ class UserViewSet(viewsets.ModelViewSet):
         logger.info(f"Pagination: page={page}, size={page_size}, offset={offset}")
 
         try:
-            from django.db.models import Q, Case, When, FloatField, BooleanField
+            from django.db.models import Q, Case, When, FloatField, BooleanField, Count
             from django.db import models
             from .models import Compatibility
             from .serializers import SimpleUserSerializer
@@ -675,6 +685,22 @@ class UserViewSet(viewsets.ModelViewSet):
                     Q(user2=request.user, user1__is_banned=True)
                 )
 
+                # Filter out users who haven't completed mandatory onboarding
+                mandatory_count = Question.objects.filter(is_mandatory=True).values('question_number').distinct().count()
+                if mandatory_count > 0:
+                    from django.db.models import Count
+                    incomplete_user_ids = User.objects.annotate(
+                        mandatory_answered=Count(
+                            'answers__question__question_number',
+                            filter=Q(answers__question__is_mandatory=True),
+                            distinct=True
+                        )
+                    ).filter(mandatory_answered__lt=mandatory_count).values_list('id', flat=True)
+                    compatibilities = compatibilities.exclude(
+                        Q(user1=request.user, user2__id__in=incomplete_user_ids) |
+                        Q(user2=request.user, user1__id__in=incomplete_user_ids)
+                    )
+
                 compatibility_results = []
 
                 for comp in compatibilities:
@@ -989,6 +1015,21 @@ class UserViewSet(viewsets.ModelViewSet):
                 Q(user1=request.user, user2__is_banned=True) |
                 Q(user2=request.user, user1__is_banned=True)
             )
+
+            # Filter out users who haven't completed mandatory onboarding
+            mandatory_count = Question.objects.filter(is_mandatory=True).values('question_number').distinct().count()
+            if mandatory_count > 0:
+                incomplete_user_ids = User.objects.annotate(
+                    mandatory_answered=Count(
+                        'answers__question__question_number',
+                        filter=Q(answers__question__is_mandatory=True),
+                        distinct=True
+                    )
+                ).filter(mandatory_answered__lt=mandatory_count).values_list('id', flat=True)
+                compatibilities = compatibilities.exclude(
+                    Q(user1=request.user, user2__id__in=incomplete_user_ids) |
+                    Q(user2=request.user, user1__id__in=incomplete_user_ids)
+                )
 
             total_compatibilities = compatibilities.count()
 
@@ -2646,8 +2687,8 @@ class UserReportViewSet(viewsets.ModelViewSet):
         # if not request.user.is_staff:
         #     return Response({'error': 'Staff only'}, status=403)
         
-        # Get all reports with user details
-        reports = UserReport.objects.select_related('reported_user', 'reporter').all()
+        # Get only pending reports with user details
+        reports = UserReport.objects.select_related('reported_user', 'reporter').filter(status='pending')
         
         # Group by reported user and aggregate data
         reported_users_data = {}
@@ -2664,7 +2705,9 @@ class UserReportViewSet(viewsets.ModelViewSet):
                         'profile_photo': report.reported_user.profile_photo or None,
                     },
                     'report_ids': [str(report.id)],
-                    'report_reason': report.reason,
+                    'report_reasons': [report.reason_category],
+                    'report_reason': report.reason_category,
+                    'report_reason_detail': report.reason if report.reason_category == 'other' else '',
                     'report_date': report.created_at,
                     'report_count': 1,
                     'status': report.status,
@@ -2675,11 +2718,13 @@ class UserReportViewSet(viewsets.ModelViewSet):
                 }
             else:
                 reported_users_data[user_id]['report_ids'].append(str(report.id))
+                if report.reason_category not in reported_users_data[user_id]['report_reasons']:
+                    reported_users_data[user_id]['report_reasons'].append(report.reason_category)
                 reported_users_data[user_id]['report_count'] += 1
                 reported_users_data[user_id]['reporter_count'] += 1
                 if report.created_at > reported_users_data[user_id]['last_reported']:
                     reported_users_data[user_id]['last_reported'] = report.created_at
-                    reported_users_data[user_id]['report_reason'] = report.reason
+                    reported_users_data[user_id]['report_reason'] = report.reason_category
 
         # Compute severity based on report count
         for data in reported_users_data.values():
@@ -2716,7 +2761,7 @@ class UserReportViewSet(viewsets.ModelViewSet):
             duration = request.data.get('duration', 30)
             reported_user = report.reported_user
             reported_user.is_banned = True
-            reported_user.restriction_reason = f'Reported: {report.reason}'
+            reported_user.restriction_reason = report.reason_category
             reported_user.restriction_date = timezone.now()
             reported_user.restriction_type = 'temporary'
             reported_user.restriction_duration = int(duration)
@@ -2732,7 +2777,7 @@ class UserReportViewSet(viewsets.ModelViewSet):
             # Apply permanent restriction to reported user
             reported_user = report.reported_user
             reported_user.is_banned = True
-            reported_user.restriction_reason = f'Permanently banned due to report: {report.reason}'
+            reported_user.restriction_reason = report.reason_category
             reported_user.restriction_date = timezone.now()
             reported_user.restriction_type = 'permanent'
             reported_user.restriction_duration = 0
@@ -3196,7 +3241,7 @@ class ConversationViewSet(viewsets.ModelViewSet):
 
         return Response({'count': count})
 
-    @action(detail=False, methods=['post'])
+    @action(detail=False, methods=['post'], authentication_classes=[], permission_classes=[permissions.AllowAny])
     def broadcast(self, request):
         """Send a message from admin to all active, non-admin, non-banned users.
 
@@ -3285,6 +3330,63 @@ class ConversationViewSet(viewsets.ModelViewSet):
         Conversation.objects.filter(id__in=conv_ids).update(updated_at=timezone.now())
 
         return Response({'sent_count': len(recipients)})
+
+    @action(detail=False, methods=['get'], authentication_classes=[], permission_classes=[permissions.AllowAny])
+    def broadcast_history(self, request):
+        """Get history of broadcast messages sent by admin.
+
+        Groups messages by content and approximate send time (within 60 seconds)
+        to identify individual broadcasts.
+        """
+        admin_id = request.query_params.get('user_id')
+        if not admin_id:
+            return Response({'error': 'user_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            admin_user = User.objects.get(id=admin_id, is_admin=True)
+        except User.DoesNotExist:
+            return Response({'error': 'User must be an admin'}, status=status.HTTP_403_FORBIDDEN)
+
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 10))
+
+        # Get all messages sent by admin, grouped by content and time
+        from django.db.models import Count, Min
+        from django.db.models.functions import TruncMinute
+
+        broadcasts = (
+            Message.objects.filter(sender=admin_user)
+            .annotate(sent_minute=TruncMinute('created_at'))
+            .values('content', 'sent_minute')
+            .annotate(
+                recipient_count=Count('id'),
+                sent_at=Min('created_at'),
+            )
+            .order_by('-sent_at')
+        )
+
+        # Filter to only include actual broadcasts (sent to multiple users)
+        broadcast_list = [
+            {
+                'content': b['content'],
+                'recipient_count': b['recipient_count'],
+                'sent_at': b['sent_at'].isoformat(),
+            }
+            for b in broadcasts
+            if b['recipient_count'] > 1
+        ]
+
+        # Paginate
+        total = len(broadcast_list)
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_results = broadcast_list[start:end]
+
+        return Response({
+            'results': page_results,
+            'count': total,
+            'next': page * page_size < total,
+        })
 
     @action(detail=False, methods=['get'])
     def admin_conversations(self, request):
