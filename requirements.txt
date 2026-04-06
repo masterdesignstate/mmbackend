@@ -18,6 +18,7 @@ itypes==1.2.0
 Jinja2==3.1.6
 MarkupSafe==3.0.2
 pillow==11.3.0
+posthog==7.9.12
 psycopg2-binary==2.9.10
 pycparser==2.22
 python-decouple==3.8

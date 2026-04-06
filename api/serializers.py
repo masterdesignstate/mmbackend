@@ -26,12 +26,12 @@ class UserSerializer(serializers.ModelSerializer):
             'profile_photo', 'age', 'date_of_birth', 'height', 'from_location', 'live', 'tagline', 'bio',
             'is_online', 'last_active', 'questions_answered_count', 'online_status', 'question_answers',
             'date_joined', 'is_banned', 'is_admin', 'mandatory_questions_complete',
-            'restriction_type', 'restriction_duration', 'restriction_reason', 'restriction_date'
+            'restriction_type', 'restriction_duration', 'restriction_reason', 'restriction_reason_detail', 'restriction_date'
         ]
         read_only_fields = [
             'id', 'last_active', 'questions_answered_count',
             'date_joined', 'is_banned', 'is_admin', 'mandatory_questions_complete',
-            'restriction_type', 'restriction_duration', 'restriction_reason', 'restriction_date'
+            'restriction_type', 'restriction_duration', 'restriction_reason', 'restriction_reason_detail', 'restriction_date'
         ]
 
     def get_is_online(self, obj):

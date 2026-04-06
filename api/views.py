@@ -16,6 +16,7 @@ from .models import (
     CompatibilityJob, Notification, Conversation,
 )
 from .services.compatibility_service import CompatibilityService
+from .analytics import capture as posthog_capture
 from .services.compatibility_queue import (
     enqueue_user_for_recalculation,
     should_enqueue_after_answer,
@@ -221,9 +222,10 @@ class UserViewSet(viewsets.ModelViewSet):
         user.restriction_type = restriction_type
         user.restriction_duration = duration
         user.restriction_reason = reason
+        user.restriction_reason_detail = request.data.get('reason_detail', '')
         user.restriction_date = timezone.now()
         user.save()
-        
+
         return Response({'status': 'user restricted'})
 
     @action(detail=True, methods=['post'])
@@ -234,18 +236,24 @@ class UserViewSet(viewsets.ModelViewSet):
         #     return Response({'error': 'Staff only'}, status=403)
         
         user = self.get_object()
+        description = request.data.get('description', '')
+
         user.is_banned = False
         user.restriction_type = None
         user.restriction_duration = None
         user.restriction_reason = ''
+        user.restriction_reason_detail = ''
         user.restriction_date = None
         user.save()
 
-        # Also dismiss any pending reports for this user
+        # Also dismiss any pending reports for this user, storing the description as moderator notes
+        update_fields = {'status': 'dismissed', 'resolved_at': timezone.now()}
+        if description:
+            update_fields['moderator_notes'] = description
         UserReport.objects.filter(
             reported_user=user,
             status='pending'
-        ).update(status='dismissed', resolved_at=timezone.now())
+        ).update(**update_fields)
 
         return Response({'status': 'restriction removed'})
 
@@ -2344,6 +2352,8 @@ class UserResultViewSet(viewsets.ModelViewSet):
                         related_user_result=user_result
                     )
                     logger.info(f"Created match notifications between {user.username} and {result_user.username}")
+                    posthog_capture(str(user.id), 'match_created_server', {'matched_user_id': str(result_user.id)})
+                    posthog_capture(str(result_user.id), 'match_created_server', {'matched_user_id': str(user.id)})
 
             # Create notification for approve or like
             if notification_type:
@@ -2707,7 +2717,8 @@ class UserReportViewSet(viewsets.ModelViewSet):
                     'report_ids': [str(report.id)],
                     'report_reasons': [report.reason_category],
                     'report_reason': report.reason_category,
-                    'report_reason_detail': report.reason if report.reason_category == 'other' else '',
+                    'report_reason_detail': report.reason or '',
+                    'report_reason_details': {report.reason_category: report.reason} if report.reason else {},
                     'report_date': report.created_at,
                     'report_count': 1,
                     'status': report.status,
@@ -2720,6 +2731,9 @@ class UserReportViewSet(viewsets.ModelViewSet):
                 reported_users_data[user_id]['report_ids'].append(str(report.id))
                 if report.reason_category not in reported_users_data[user_id]['report_reasons']:
                     reported_users_data[user_id]['report_reasons'].append(report.reason_category)
+                # Collect reason details per category
+                if report.reason and report.reason_category not in reported_users_data[user_id]['report_reason_details']:
+                    reported_users_data[user_id]['report_reason_details'][report.reason_category] = report.reason
                 reported_users_data[user_id]['report_count'] += 1
                 reported_users_data[user_id]['reporter_count'] += 1
                 if report.created_at > reported_users_data[user_id]['last_reported']:
@@ -2751,42 +2765,50 @@ class UserReportViewSet(viewsets.ModelViewSet):
         action = request.data.get('action', 'dismiss')
         
         if action == 'dismiss':
-            report.status = 'dismissed'
-            report.resolved_at = timezone.now()
-            report.save()
+            # Dismiss all pending reports for this user
+            UserReport.objects.filter(
+                reported_user=report.reported_user,
+                status='pending'
+            ).update(status='dismissed', resolved_at=timezone.now())
             return Response({'status': 'dismissed'})
-        
+
         elif action == 'restrict':
             # Apply temporary restriction to reported user
             duration = request.data.get('duration', 30)
             reported_user = report.reported_user
             reported_user.is_banned = True
             reported_user.restriction_reason = report.reason_category
+            reported_user.restriction_reason_detail = report.reason or ''
             reported_user.restriction_date = timezone.now()
             reported_user.restriction_type = 'temporary'
             reported_user.restriction_duration = int(duration)
             reported_user.save()
-            
-            report.status = 'resolved'
-            report.resolved_at = timezone.now()
-            report.save()
-            
+
+            # Resolve all pending reports for this user
+            UserReport.objects.filter(
+                reported_user=reported_user,
+                status='pending'
+            ).update(status='resolved', resolved_at=timezone.now())
+
             return Response({'status': 'restricted'})
-        
+
         elif action == 'permanent':
             # Apply permanent restriction to reported user
             reported_user = report.reported_user
             reported_user.is_banned = True
             reported_user.restriction_reason = report.reason_category
+            reported_user.restriction_reason_detail = report.reason or ''
             reported_user.restriction_date = timezone.now()
             reported_user.restriction_type = 'permanent'
             reported_user.restriction_duration = 0
             reported_user.save()
-            
-            report.status = 'resolved'
-            report.resolved_at = timezone.now()
-            report.save()
-            
+
+            # Resolve all pending reports for this user
+            UserReport.objects.filter(
+                reported_user=reported_user,
+                status='pending'
+            ).update(status='resolved', resolved_at=timezone.now())
+
             return Response({'status': 'permanently_banned'})
 
         return Response({'error': 'Invalid action'}, status=400)
@@ -3174,6 +3196,7 @@ class ConversationViewSet(viewsets.ModelViewSet):
                 sender.ban_reason = f'Restricted words detected in message: {", ".join(found_words)}'
                 sender.ban_date = timezone.now()
                 sender.save(update_fields=['is_banned', 'ban_reason', 'ban_date'])
+                posthog_capture(str(sender_id), 'user_auto_banned', {'reason': 'restricted_words', 'found_words_count': len(found_words)})
             except User.DoesNotExist:
                 pass
             return Response({
@@ -3197,6 +3220,7 @@ class ConversationViewSet(viewsets.ModelViewSet):
 
         # Update conversation's updated_at
         conversation.save()  # This will update the auto_now field
+        posthog_capture(str(sender_id), 'message_sent_server', {'conversation_id': str(conversation.id), 'recipient_id': str(receiver.id)})
 
         serializer = MessageSerializer(message)
         return Response(serializer.data, status=status.HTTP_201_CREATED)

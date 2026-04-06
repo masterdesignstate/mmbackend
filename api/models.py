@@ -27,6 +27,7 @@ class User(AbstractUser):
     restriction_type = models.CharField(max_length=20, null=True, blank=True, help_text="temporary or permanent")
     restriction_duration = models.PositiveIntegerField(null=True, blank=True, help_text="Duration in days (for temporary)")
     restriction_reason = models.TextField(blank=True)
+    restriction_reason_detail = models.TextField(blank=True, default='', help_text="Additional description for the restriction reason")
     restriction_date = models.DateTimeField(null=True, blank=True)
     questions_answered_count = models.PositiveIntegerField(default=0)
 
