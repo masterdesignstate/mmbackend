@@ -944,3 +944,85 @@ def delete_question(request, question_id):
         return JsonResponse({
             'error': f'Failed to delete question: {str(e)}'
         }, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def impostor_login(request):
+    """Allow an admin to log in as another user (impostor mode)."""
+    try:
+        data = json.loads(request.body)
+        admin_user_id = data.get('admin_user_id')
+        target_user_id = data.get('target_user_id')
+
+        if not admin_user_id or not target_user_id:
+            return JsonResponse({'error': 'admin_user_id and target_user_id are required'}, status=400)
+
+        # Verify admin
+        try:
+            admin_user = User.objects.get(id=admin_user_id)
+        except User.DoesNotExist:
+            return JsonResponse({'error': 'Admin user not found'}, status=404)
+
+        if not admin_user.is_admin:
+            return JsonResponse({'error': 'Unauthorized - admin access required'}, status=403)
+
+        # Get target user
+        try:
+            target_user = User.objects.get(id=target_user_id)
+        except User.DoesNotExist:
+            return JsonResponse({'error': 'Target user not found'}, status=404)
+
+        # Switch session to target user (must specify backend since we skip authenticate())
+        login(request, target_user, backend='django.contrib.auth.backends.ModelBackend')
+
+        print(f"🕵️ IMPOSTOR MODE: Admin {admin_user.email} logged in as {target_user.email}")
+
+        return JsonResponse({
+            'success': True,
+            'is_impostor': True,
+            'user_id': str(target_user.id),
+            'admin_user_id': str(admin_user.id),
+            'user_data': {
+                'username': target_user.username,
+                'email': target_user.email,
+                'full_name': f"{target_user.first_name} {target_user.last_name}".strip(),
+            }
+        })
+
+    except Exception as e:
+        return JsonResponse({'error': f'Impostor login failed: {str(e)}'}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def impostor_exit(request):
+    """Exit impostor mode and restore the admin session."""
+    try:
+        data = json.loads(request.body)
+        admin_user_id = data.get('admin_user_id')
+
+        if not admin_user_id:
+            return JsonResponse({'error': 'admin_user_id is required'}, status=400)
+
+        try:
+            admin_user = User.objects.get(id=admin_user_id)
+        except User.DoesNotExist:
+            return JsonResponse({'error': 'Admin user not found'}, status=404)
+
+        if not admin_user.is_admin:
+            return JsonResponse({'error': 'Unauthorized - admin access required'}, status=403)
+
+        # Restore admin session (must specify backend since we skip authenticate())
+        login(request, admin_user, backend='django.contrib.auth.backends.ModelBackend')
+
+        print(f"🕵️ IMPOSTOR MODE EXIT: Admin {admin_user.email} restored")
+
+        return JsonResponse({
+            'success': True,
+            'user_id': str(admin_user.id),
+            'is_admin': True,
+        })
+
+    except Exception as e:
+        return JsonResponse({'error': f'Impostor exit failed: {str(e)}'}, status=500)

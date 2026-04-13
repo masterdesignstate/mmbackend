@@ -6,7 +6,8 @@ from .views import (
     PictureModerationViewSet, UserReportViewSet, UserTagViewSet, StatsViewSet, ControlsViewSet, NotificationViewSet, ConversationViewSet
 )
 from .function_views import (
-    user_signup, user_personal_details, user_login, check_user_exists, check_onboarding_status, update_profile_photo, upload_photo, test_endpoint, delete_question
+    user_signup, user_personal_details, user_login, check_user_exists, check_onboarding_status, update_profile_photo, upload_photo, test_endpoint, delete_question,
+    impostor_login, impostor_exit
 )
 
 router = DefaultRouter()
@@ -40,4 +41,6 @@ urlpatterns = [
     path('auth/upload-photo', upload_photo, name='upload_photo_no_slash'),
     path('test/', test_endpoint, name='test_endpoint'),
     path('questions/<str:question_id>/delete/', delete_question, name='delete_question'),
+    path('auth/impostor-login/', impostor_login, name='impostor_login'),
+    path('auth/impostor-exit/', impostor_exit, name='impostor_exit'),
 ] 
