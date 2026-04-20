@@ -9,7 +9,7 @@ from django.contrib.auth.hashers import make_password
 from django.utils import timezone
 from django.conf import settings
 from datetime import datetime
-from .models import User
+from .models import User, InviteCode
 from .utils.admin_utils import ensure_dashboard_admin
 
 logger = logging.getLogger(__name__)
@@ -40,11 +40,12 @@ def user_signup(request):
         data = json.loads(request.body)
         email = data.get('email')
         password = data.get('password')
-        
+        alpha_code = (data.get('alpha_code') or data.get('invite_code') or '').strip()
+
         print(f"📝 USER SIGNUP REQUEST for email: {email}")
         print(f"🔑 Password length: {len(password) if password else 0}")
-        print(f"📊 Parsed data: {data}")
-        
+        print(f"🎟️  Invite code provided: {bool(alpha_code)}")
+
         # Validate required fields
         if not email or not password:
             print("❌ Missing required fields")
@@ -52,6 +53,12 @@ def user_signup(request):
             print(f"   Password present: {bool(password)}")
             return JsonResponse({
                 'error': 'Email and password are required'
+            }, status=400)
+
+        if not alpha_code:
+            print("❌ Missing invite code")
+            return JsonResponse({
+                'error': 'Invite code is required'
             }, status=400)
         
         # Validate email format
@@ -85,6 +92,17 @@ def user_signup(request):
         # Create the user
         with transaction.atomic():
             print(f"🔒 Starting database transaction")
+
+            try:
+                invite = InviteCode.objects.select_for_update().get(
+                    code=alpha_code, is_used=False
+                )
+            except InviteCode.DoesNotExist:
+                print(f"❌ Invalid or already used invite code: {alpha_code}")
+                return JsonResponse({
+                    'error': 'Invalid or already used invite code'
+                }, status=400)
+
             user = User.objects.create(
                 username=email,  # Use email as username for now
                 email=email,
@@ -92,7 +110,13 @@ def user_signup(request):
                 is_active=True,
                 date_joined=timezone.now()
             )
-            
+
+            invite.is_used = True
+            invite.used_by = user
+            invite.used_at = timezone.now()
+            invite.save(update_fields=['is_used', 'used_by', 'used_at'])
+            print(f"🎟️  Invite code {invite.code} redeemed by user {user.id}")
+
             print(f"✅ USER CREATED successfully!")
             print(f"   User ID: {user.id}")
             print(f"   Email: {user.email}")
@@ -167,20 +191,7 @@ def user_personal_details(request):
         print(f"📝 PERSONAL DETAILS REQUEST for user: {user_id}")
         print(f"📊 Parsed data: {data}")
         
-        # Validate required fields
-        required_fields = ['user_id', 'full_name', 'username', 'date_of_birth', 'from', 'live']
-        missing_fields = [field for field in required_fields if field not in data or not data.get(field)]
-        
-        if missing_fields:
-            print(f"❌ Missing required fields: {missing_fields}")
-            print(f"   Available fields: {list(data.keys())}")
-            return JsonResponse({
-                'error': f'Missing required fields: {", ".join(missing_fields)}'
-            }, status=400)
-        
-        print(f"✅ All required fields present")
-        
-        # Get the user
+        # Get the user first so we can determine whether identity fields are locked
         try:
             user = User.objects.get(id=user_id)
             print(f"✅ User found: {user.id} - {user.email}")
@@ -189,53 +200,85 @@ def user_personal_details(request):
             return JsonResponse({
                 'error': 'User not found'
             }, status=404)
-        
-        # Parse date of birth
-        try:
-            date_of_birth = datetime.strptime(data.get('date_of_birth'), '%Y-%m-%d').date()
-            print(f"📅 Date of birth parsed: {date_of_birth}")
-        except ValueError as e:
-            print(f"❌ Invalid date format: {data.get('date_of_birth')}")
-            print(f"   Error: {str(e)}")
-            return JsonResponse({
-                'error': 'Invalid date format. Expected YYYY-MM-DD'
-            }, status=400)
-        
-        # Calculate age
-        today = timezone.now().date()
-        age = today.year - date_of_birth.year - ((today.month, today.day) < (date_of_birth.month, date_of_birth.day))
-        print(f"🎂 Calculated age: {age}")
-        
-        # Validate age (must be 18+)
-        if age < 18:
-            print(f"❌ User too young: {age} years old")
-            return JsonResponse({
-                'error': 'User must be at least 18 years old'
-            }, status=400)
-        
-        print(f"✅ Age validation passed: {age} years old")
-        
-        # Check if username is already taken
-        username = data.get('username')
-        existing_username = User.objects.filter(username=username).exclude(id=user_id).first()
-        if existing_username:
-            print(f"❌ Username already taken: {username}")
-            print(f"   Taken by user: {existing_username.id} - {existing_username.email}")
-            return JsonResponse({
-                'error': 'Username is already taken'
-            }, status=409)
-        
-        print(f"✅ Username available: {username}")
 
-        # Validate for restricted words
+        identity_already_set = bool(
+            user.date_of_birth
+            or user.first_name
+            or user.last_name
+            or (user.username and user.username != user.email)
+        )
+        print(f"🔒 Identity already set (locked): {identity_already_set}")
+
+        # Validate required fields - identity fields (full_name, username, date_of_birth)
+        # are required only on initial onboarding; once set, they're locked and ignored.
+        required_fields = ['user_id', 'from', 'live']
+        if not identity_already_set:
+            required_fields += ['full_name', 'username', 'date_of_birth']
+        missing_fields = [field for field in required_fields if field not in data or not data.get(field)]
+
+        if missing_fields:
+            print(f"❌ Missing required fields: {missing_fields}")
+            print(f"   Available fields: {list(data.keys())}")
+            return JsonResponse({
+                'error': f'Missing required fields: {", ".join(missing_fields)}'
+            }, status=400)
+
+        print(f"✅ All required fields present")
+
+        date_of_birth = None
+        age = None
+        if not identity_already_set:
+            # Parse date of birth
+            try:
+                date_of_birth = datetime.strptime(data.get('date_of_birth'), '%Y-%m-%d').date()
+                print(f"📅 Date of birth parsed: {date_of_birth}")
+            except ValueError as e:
+                print(f"❌ Invalid date format: {data.get('date_of_birth')}")
+                print(f"   Error: {str(e)}")
+                return JsonResponse({
+                    'error': 'Invalid date format. Expected YYYY-MM-DD'
+                }, status=400)
+
+            # Calculate age
+            today = timezone.now().date()
+            age = today.year - date_of_birth.year - ((today.month, today.day) < (date_of_birth.month, date_of_birth.day))
+            print(f"🎂 Calculated age: {age}")
+
+            # Validate age (must be 18+)
+            if age < 18:
+                print(f"❌ User too young: {age} years old")
+                return JsonResponse({
+                    'error': 'User must be at least 18 years old'
+                }, status=400)
+
+            print(f"✅ Age validation passed: {age} years old")
+
+            # Check if username is already taken
+            username = data.get('username')
+            existing_username = User.objects.filter(username=username).exclude(id=user_id).first()
+            if existing_username:
+                print(f"❌ Username already taken: {username}")
+                print(f"   Taken by user: {existing_username.id} - {existing_username.email}")
+                return JsonResponse({
+                    'error': 'Username is already taken'
+                }, status=409)
+
+            print(f"✅ Username available: {username}")
+        else:
+            username = user.username
+
+        # Validate for restricted words (only check fields that can actually change)
         from api.utils.word_filter import validate_text_fields
 
-        has_restricted, found_words = validate_text_fields(
-            username=username,
-            full_name=data.get('full_name'),
-            tagline=data.get('tagline'),
-            bio=data.get('bio')
-        )
+        word_filter_kwargs = {
+            'tagline': data.get('tagline'),
+            'bio': data.get('bio'),
+        }
+        if not identity_already_set:
+            word_filter_kwargs['username'] = username
+            word_filter_kwargs['full_name'] = data.get('full_name')
+
+        has_restricted, found_words = validate_text_fields(**word_filter_kwargs)
 
         if has_restricted:
             print(f"❌ Restricted words found: {found_words}")
@@ -276,25 +319,28 @@ def user_personal_details(request):
         old_first_name = user.first_name
         old_last_name = user.last_name
         old_username = user.username
-        
-        # Handle full name splitting more intelligently
-        full_name = data.get('full_name', '').strip()
-        if full_name:
-            name_parts = full_name.split()
-            if len(name_parts) == 1:
-                # Single name - put it in first_name
-                user.first_name = name_parts[0]
-                user.last_name = ''
+
+        if not identity_already_set:
+            # Handle full name splitting more intelligently
+            full_name = data.get('full_name', '').strip()
+            if full_name:
+                name_parts = full_name.split()
+                if len(name_parts) == 1:
+                    # Single name - put it in first_name
+                    user.first_name = name_parts[0]
+                    user.last_name = ''
+                else:
+                    # Multiple names - first goes to first_name, rest to last_name
+                    user.first_name = name_parts[0]
+                    user.last_name = ' '.join(name_parts[1:])
             else:
-                # Multiple names - first goes to first_name, rest to last_name
-                user.first_name = name_parts[0]
-                user.last_name = ' '.join(name_parts[1:])
+                user.first_name = ''
+                user.last_name = ''
+            user.username = username
+            user.date_of_birth = date_of_birth
+            user.age = age
         else:
-            user.first_name = ''
-            user.last_name = ''
-        user.username = username
-        user.date_of_birth = date_of_birth
-        user.age = age
+            print(f"🔒 Identity fields locked - ignoring full_name / username / date_of_birth from payload")
         user.height = int(height_cm) if height_cm else None
         user.from_location = data.get('from')
         user.live = data.get('live')

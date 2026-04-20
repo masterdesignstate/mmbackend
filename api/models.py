@@ -42,6 +42,25 @@ class User(AbstractUser):
         db_table = 'users'
 
 
+class InviteCode(models.Model):
+    """Single-use invite codes for account creation."""
+    code = models.CharField(max_length=16, unique=True, db_index=True)
+    is_used = models.BooleanField(default=False)
+    used_by = models.OneToOneField(
+        User, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='invite_code_used'
+    )
+    used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'invite_codes'
+        indexes = [models.Index(fields=['code', 'is_used'])]
+
+    def __str__(self):
+        return f"{self.code} ({'used' if self.is_used else 'available'})"
+
+
 class Tag(models.Model):
     """Tags for questions and user results"""
     TAG_CHOICES = [
