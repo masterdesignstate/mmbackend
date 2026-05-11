@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 from .models import (
     User, Tag, Question, UserAnswer, UserRequiredQuestion, Compatibility,
     UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, Controls,
-    CompatibilityJob, Notification, Conversation,
+    CompatibilityJob, Notification, Conversation, UserPicture,
+    Post, PostImage, PostHashtag, PostRevision, PostReaction, PostComment, FeedActivity,
 )
 from .services.compatibility_service import CompatibilityService
 from .analytics import capture as posthog_capture
@@ -100,6 +101,100 @@ class UserViewSet(viewsets.ModelViewSet):
         serializer = DetailedUserSerializer(request.user)
         return Response(serializer.data)
 
+    # ----- Picture gallery (up to UserPicture.MAX_PER_USER per user) -----
+
+    def _resync_primary_photo(self, user):
+        """Set user.profile_photo to the URL of the order=0 picture (or None if no pictures)."""
+        primary = user.pictures.order_by('order', 'created_at').first()
+        new_url = primary.image_url if primary else None
+        if user.profile_photo != new_url:
+            user.profile_photo = new_url
+            user.save(update_fields=['profile_photo'])
+
+    @action(detail=True, methods=['get', 'post'], url_path='pictures')
+    def pictures(self, request, pk=None):
+        """GET: list this user's pictures. POST {image_url}: append a new picture."""
+        from .serializers import UserPictureSerializer
+        user = self.get_object()
+        if request.method == 'GET':
+            serializer = UserPictureSerializer(user.pictures.all(), many=True)
+            return Response(serializer.data)
+
+        # POST
+        image_url = request.data.get('image_url')
+        if not image_url:
+            return Response({'error': 'image_url is required'}, status=status.HTTP_400_BAD_REQUEST)
+        existing_count = user.pictures.count()
+        if existing_count >= UserPicture.MAX_PER_USER:
+            return Response(
+                {'error': f'Maximum of {UserPicture.MAX_PER_USER} pictures per user.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Append at the next order slot
+        next_order = existing_count
+        picture = UserPicture.objects.create(user=user, image_url=image_url, order=next_order)
+        # Submit to moderation queue (mirrors existing single-photo flow)
+        try:
+            PictureModeration.objects.create(user=user, picture_url=image_url, status='pending')
+        except Exception as e:
+            logger.warning(f'Could not create moderation record: {e}')
+        # Auto-feed: emit a photo_added activity
+        try:
+            FeedActivity.objects.create(
+                user=user,
+                kind='photo_added',
+                payload={'image_url': image_url, 'picture_id': str(picture.id)},
+            )
+        except Exception as e:
+            logger.warning(f'Could not record photo_added activity: {e}')
+        self._resync_primary_photo(user)
+        return Response(UserPictureSerializer(picture).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path='pictures/reorder')
+    def reorder_pictures(self, request, pk=None):
+        """POST {order: [picture_id, ...]} — set the gallery order. Must include all current pictures."""
+        from .serializers import UserPictureSerializer
+        user = self.get_object()
+        order_ids = request.data.get('order')
+        if not isinstance(order_ids, list) or not order_ids:
+            return Response({'error': 'order must be a non-empty list of picture IDs'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        existing = {str(p.id): p for p in user.pictures.all()}
+        if set(order_ids) != set(existing.keys()):
+            return Response(
+                {'error': 'order must contain every existing picture id exactly once'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Two-pass to avoid the unique_together (user, order) collision
+        for pic in existing.values():
+            pic.order = pic.order + 1000  # temporary unique offset
+            pic.save(update_fields=['order'])
+        for new_order, pid in enumerate(order_ids):
+            pic = existing[pid]
+            pic.order = new_order
+            pic.save(update_fields=['order'])
+        self._resync_primary_photo(user)
+        serializer = UserPictureSerializer(user.pictures.order_by('order'), many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['delete'], url_path=r'pictures/(?P<picture_id>[0-9a-fA-F-]{36})')
+    def delete_picture(self, request, pk=None, picture_id=None):
+        """Remove one picture, then reflow remaining orders to be contiguous (0..n-1)."""
+        user = self.get_object()
+        try:
+            picture = user.pictures.get(id=picture_id)
+        except UserPicture.DoesNotExist:
+            return Response({'error': 'Picture not found'}, status=status.HTTP_404_NOT_FOUND)
+        picture.delete()
+        # Reflow orders to keep them contiguous
+        remaining = list(user.pictures.order_by('order', 'created_at'))
+        for new_order, pic in enumerate(remaining):
+            if pic.order != new_order:
+                pic.order = new_order
+                pic.save(update_fields=['order'])
+        self._resync_primary_photo(user)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
     @action(detail=False, methods=['get'])
     def get_admin(self, request):
         """Get the first admin user's ID for contact purposes"""
@@ -147,7 +242,31 @@ class UserViewSet(viewsets.ModelViewSet):
                     'is_banned': True
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-        return super().update(request, *args, **kwargs)
+        # Snapshot the bio BEFORE the update so we can detect a real change.
+        prior_bio = None
+        try:
+            target = self.get_object()
+            prior_bio = target.bio
+        except Exception:
+            prior_bio = None
+
+        response = super().update(request, *args, **kwargs)
+
+        # Auto-feed: emit a bio_updated activity if bio actually changed.
+        try:
+            if 'bio' in request.data and response.status_code in (200, 202):
+                target.refresh_from_db(fields=['bio'])
+                new_bio = target.bio or ''
+                if (prior_bio or '') != new_bio:
+                    FeedActivity.objects.create(
+                        user=target,
+                        kind='bio_updated',
+                        payload={'snippet': new_bio[:160]},
+                    )
+        except Exception as e:
+            logger.warning(f'Could not record bio_updated activity: {e}')
+
+        return response
 
     @action(detail=True, methods=['post'])
     def update_online_status(self, request, pk=None):
@@ -2039,6 +2158,29 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
                 }
             )
 
+            # Auto-feed: emit a question_answered activity. Debounce within 60s
+            # for the same (user, question) pair to avoid spam from multi-field edits.
+            try:
+                recent_cutoff = timezone.now() - timedelta(seconds=60)
+                qid_str = str(question.id)
+                recent = FeedActivity.objects.filter(
+                    user=user,
+                    kind='question_answered',
+                    created_at__gte=recent_cutoff,
+                ).only('payload')
+                already = any((a.payload or {}).get('question_id') == qid_str for a in recent)
+                if not already:
+                    FeedActivity.objects.create(
+                        user=user,
+                        kind='question_answered',
+                        payload={
+                            'question_id': qid_str,
+                            'question_text': question.text or '',
+                        },
+                    )
+            except Exception as e:
+                logger.warning(f'Could not record question_answered activity: {e}')
+
             # Maintain answered count and determine whether to enqueue a compatibility job
             if created:
                 User.objects.filter(id=user.id).update(
@@ -2317,6 +2459,27 @@ class UserResultViewSet(viewsets.ModelViewSet):
                 'result_user_id': str(result_user_id)
             })
         else:
+            # Gate: if tag is 'like' and the target user requires answered required questions,
+            # block the new like unless the liker has answered all of target's required questions.
+            if tag == 'like' and getattr(result_user, 'require_answers_for_likes', False):
+                required_qids = set(
+                    UserRequiredQuestion.objects.filter(user=result_user).values_list('question_id', flat=True)
+                )
+                if required_qids:
+                    answered_qids = set(
+                        UserAnswer.objects.filter(
+                            user=user, question_id__in=required_qids
+                        ).values_list('question_id', flat=True)
+                    )
+                    if not required_qids.issubset(answered_qids):
+                        return Response(
+                            {
+                                'error': 'required_questions_unanswered',
+                                'message': "You must answer all of this user's required questions before you can like them."
+                            },
+                            status=status.HTTP_403_FORBIDDEN,
+                        )
+
             # Tag doesn't exist, add it
             user_result = UserResult.objects.create(
                 user=user,
@@ -3445,3 +3608,340 @@ class ConversationViewSet(viewsets.ModelViewSet):
 
         serializer = self.get_serializer(conversations, many=True, context={'user_id': admin_id})
         return Response(serializer.data)
+
+
+# ============================================================================
+# FEED: posts, comments, reactions, activity
+# ============================================================================
+
+def _resolve_viewer(request):
+    """Return (viewer_user, viewer_id_str) using session OR ?user_id query/body fallback."""
+    if request.user.is_authenticated:
+        return request.user, str(request.user.id)
+    user_id = request.query_params.get('user_id') if hasattr(request, 'query_params') else None
+    if not user_id and request.method != 'GET':
+        try:
+            user_id = (request.data or {}).get('user_id')
+        except Exception:
+            user_id = None
+    if user_id:
+        try:
+            u = User.objects.get(id=user_id)
+            return u, str(u.id)
+        except User.DoesNotExist:
+            return None, None
+    return None, None
+
+
+def _resolve_audience_user_ids(viewer, audience: str):
+    """Return user IDs whose posts/activities are visible to viewer for this audience.
+
+    Note: only the 'all' audience includes the viewer themselves. The other filters
+    show ONLY the people in that relationship group, not the viewer's own content.
+    """
+    if audience == 'matches':
+        my_likes = set(UserResult.objects.filter(user=viewer, tag='like').values_list('result_user_id', flat=True))
+        likes_me = set(UserResult.objects.filter(result_user=viewer, tag='like').values_list('user_id', flat=True))
+        return list(my_likes & likes_me)
+    if audience == 'approved':
+        return list(UserResult.objects.filter(user=viewer, tag='approve').values_list('result_user_id', flat=True))
+    if audience == 'liked':
+        return list(UserResult.objects.filter(user=viewer, tag='like').values_list('result_user_id', flat=True))
+    # 'all' or unknown — everyone (including viewer)
+    return list(User.objects.filter(is_banned=False).values_list('id', flat=True))
+
+
+def _sync_post_hashtags(post, body):
+    """Replace post.hashtags with the set extracted from body."""
+    from .utils.hashtags import extract_hashtags
+    new_tags = set(extract_hashtags(body))
+    PostHashtag.objects.filter(post=post).delete()
+    if new_tags:
+        PostHashtag.objects.bulk_create([PostHashtag(post=post, tag=t) for t in new_tags])
+
+
+class PostViewSet(viewsets.ModelViewSet):
+    serializer_class = None  # set per-action via get_serializer_class
+    permission_classes = [permissions.AllowAny]
+    queryset = Post.objects.filter(is_deleted=False).select_related('author').prefetch_related('images', 'hashtags', 'reactions', 'comments')
+
+    def get_serializer_class(self):
+        from .serializers import PostSerializer
+        return PostSerializer
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        _, viewer_id = _resolve_viewer(self.request)
+        ctx['viewer_id'] = viewer_id
+        return ctx
+
+    def create(self, request, *args, **kwargs):
+        from .serializers import PostSerializer
+        viewer, viewer_id = _resolve_viewer(request)
+        if not viewer:
+            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+        body = (request.data.get('body') or '').strip()
+        image_urls = request.data.get('image_urls') or []
+        visibility = (request.data.get('visibility') or 'all').lower()
+        valid_visibilities = {c[0] for c in Post.VISIBILITY_CHOICES}
+        if visibility not in valid_visibilities:
+            visibility = 'all'
+        if not body and not image_urls:
+            return Response({'error': 'Post must have a body or at least one image.'}, status=400)
+        if len(body) > 2000:
+            return Response({'error': 'Body too long (max 2000 chars).'}, status=400)
+        if not isinstance(image_urls, list) or len(image_urls) > PostImage.MAX_PER_POST:
+            return Response({'error': f'Up to {PostImage.MAX_PER_POST} images per post.'}, status=400)
+
+        post = Post.objects.create(author=viewer, body=body, visibility=visibility)
+        if image_urls:
+            PostImage.objects.bulk_create([
+                PostImage(post=post, image_url=url, order=i) for i, url in enumerate(image_urls)
+            ])
+        _sync_post_hashtags(post, body)
+        serializer = PostSerializer(post, context={'request': request, 'viewer_id': viewer_id})
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    def partial_update(self, request, *args, **kwargs):
+        from .serializers import PostSerializer
+        post = self.get_object()
+        viewer, viewer_id = _resolve_viewer(request)
+        if not viewer or str(post.author_id) != str(viewer.id):
+            return Response({'error': 'Not your post.'}, status=status.HTTP_403_FORBIDDEN)
+        new_body = request.data.get('body')
+        new_visibility = request.data.get('visibility')
+
+        changed = False
+        update_fields = []
+
+        if new_body is not None:
+            new_body = new_body.strip()
+            if len(new_body) > 2000:
+                return Response({'error': 'Body too long (max 2000 chars).'}, status=400)
+            if new_body != post.body:
+                PostRevision.objects.create(post=post, body=post.body)
+                post.body = new_body
+                post.edited_count = (post.edited_count or 0) + 1
+                update_fields += ['body', 'edited_count']
+                _sync_post_hashtags(post, new_body)
+                changed = True
+
+        if new_visibility is not None:
+            v = str(new_visibility).lower()
+            valid = {c[0] for c in Post.VISIBILITY_CHOICES}
+            if v in valid and v != post.visibility:
+                post.visibility = v
+                update_fields.append('visibility')
+                changed = True
+
+        if changed:
+            update_fields.append('updated_at')
+            post.save(update_fields=update_fields)
+
+        serializer = PostSerializer(post, context={'request': request, 'viewer_id': viewer_id})
+        return Response(serializer.data)
+
+    def destroy(self, request, *args, **kwargs):
+        post = self.get_object()
+        viewer, _ = _resolve_viewer(request)
+        if not viewer or str(post.author_id) != str(viewer.id):
+            return Response({'error': 'Not your post.'}, status=status.HTTP_403_FORBIDDEN)
+        post.is_deleted = True
+        post.save(update_fields=['is_deleted'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=['post'], url_path='react')
+    def react(self, request, pk=None):
+        from .serializers import PostSerializer
+        post = self.get_object()
+        viewer, viewer_id = _resolve_viewer(request)
+        if not viewer:
+            return Response({'error': 'Authentication required'}, status=401)
+        kind = (request.data.get('kind') or '').lower()
+        if kind not in ('like', 'dislike'):
+            return Response({'error': "kind must be 'like' or 'dislike'."}, status=400)
+        existing = PostReaction.objects.filter(user=viewer, post=post).first()
+        if existing:
+            if existing.kind == kind:
+                existing.delete()  # toggle off
+            else:
+                existing.kind = kind
+                existing.save(update_fields=['kind'])
+        else:
+            PostReaction.objects.create(user=viewer, post=post, kind=kind)
+        serializer = PostSerializer(post, context={'request': request, 'viewer_id': viewer_id})
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='revisions')
+    def revisions(self, request, pk=None):
+        from .serializers import PostRevisionSerializer
+        post = self.get_object()
+        viewer, _ = _resolve_viewer(request)
+        if not viewer or str(post.author_id) != str(viewer.id):
+            return Response({'error': 'Not your post.'}, status=403)
+        return Response(PostRevisionSerializer(post.revisions.all(), many=True).data)
+
+
+class PostCommentViewSet(viewsets.ModelViewSet):
+    permission_classes = [permissions.AllowAny]
+    queryset = PostComment.objects.filter(is_deleted=False).select_related('author', 'post')
+
+    def get_serializer_class(self):
+        from .serializers import PostCommentSerializer
+        return PostCommentSerializer
+
+    def list(self, request, *args, **kwargs):
+        from .serializers import PostCommentSerializer
+        post_id = request.query_params.get('post')
+        qs = self.get_queryset()
+        if post_id:
+            qs = qs.filter(post_id=post_id)
+        qs = qs.order_by('created_at')
+        return Response(PostCommentSerializer(qs, many=True).data)
+
+    def create(self, request, *args, **kwargs):
+        from .serializers import PostCommentSerializer
+        viewer, _ = _resolve_viewer(request)
+        if not viewer:
+            return Response({'error': 'Authentication required'}, status=401)
+        post_id = request.data.get('post')
+        body = (request.data.get('body') or '').strip()
+        if not post_id or not body:
+            return Response({'error': 'post and body are required.'}, status=400)
+        if len(body) > 1000:
+            return Response({'error': 'Comment too long (max 1000 chars).'}, status=400)
+        try:
+            post = Post.objects.get(id=post_id, is_deleted=False)
+        except Post.DoesNotExist:
+            return Response({'error': 'Post not found.'}, status=404)
+        comment = PostComment.objects.create(post=post, author=viewer, body=body)
+        return Response(PostCommentSerializer(comment).data, status=201)
+
+    def partial_update(self, request, *args, **kwargs):
+        from .serializers import PostCommentSerializer
+        comment = self.get_object()
+        viewer, _ = _resolve_viewer(request)
+        if not viewer or str(comment.author_id) != str(viewer.id):
+            return Response({'error': 'Not your comment.'}, status=403)
+        body = request.data.get('body')
+        if body is None:
+            return Response({'error': 'Nothing to update.'}, status=400)
+        body = body.strip()
+        if not body or len(body) > 1000:
+            return Response({'error': 'Body required, max 1000 chars.'}, status=400)
+        comment.body = body
+        comment.save(update_fields=['body', 'updated_at'])
+        return Response(PostCommentSerializer(comment).data)
+
+    def destroy(self, request, *args, **kwargs):
+        comment = self.get_object()
+        viewer, _ = _resolve_viewer(request)
+        if not viewer or str(comment.author_id) != str(viewer.id):
+            return Response({'error': 'Not your comment.'}, status=403)
+        comment.is_deleted = True
+        comment.save(update_fields=['is_deleted'])
+        return Response(status=204)
+
+
+def _post_visibility_filter(viewer):
+    """Build a Q expression that filters Posts the `viewer` is allowed to see based on each post's per-author privacy setting."""
+    # Authors who have approved/liked/matched the viewer (their posts may be visible to viewer)
+    authors_approving_me = list(UserResult.objects.filter(result_user=viewer, tag='approve').values_list('user_id', flat=True))
+    authors_liking_me = list(UserResult.objects.filter(result_user=viewer, tag='like').values_list('user_id', flat=True))
+    my_likes = set(UserResult.objects.filter(user=viewer, tag='like').values_list('result_user_id', flat=True))
+    authors_matching_me = list(set(authors_liking_me) & my_likes)
+
+    return (
+        Q(author_id=viewer.id) |  # always see own posts
+        Q(visibility='all') |
+        Q(visibility='approved', author_id__in=authors_approving_me) |
+        Q(visibility='liked', author_id__in=authors_liking_me) |
+        Q(visibility='matched', author_id__in=authors_matching_me)
+    )
+
+
+class FeedView(viewsets.ViewSet):
+    """GET /api/feed/ — feed list. Query params:
+    - audience: all|matches|approved|liked (viewer's filter)
+    - q: free-text search across post body
+    - hashtag: filter posts by hashtag
+    - page, page_size
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def list(self, request):
+        from .serializers import PostSerializer, FeedActivitySerializer
+        viewer, viewer_id = _resolve_viewer(request)
+        if not viewer:
+            return Response({'error': 'Authentication required'}, status=401)
+        audience = request.query_params.get('audience') or 'all'
+        if audience not in ('all', 'matches', 'approved', 'liked'):
+            audience = 'all'
+        q = (request.query_params.get('q') or '').strip()
+        hashtag = (request.query_params.get('hashtag') or '').strip().lower().lstrip('#')
+        try:
+            page = max(1, int(request.query_params.get('page', '1')))
+            page_size = max(1, min(50, int(request.query_params.get('page_size', '20'))))
+        except (TypeError, ValueError):
+            page, page_size = 1, 20
+
+        allowed_ids = _resolve_audience_user_ids(viewer, audience)
+        if not allowed_ids:
+            return Response({'results': [], 'has_next': False, 'page': page, 'audience': audience})
+
+        posts_qs = Post.objects.filter(is_deleted=False, author_id__in=allowed_ids) \
+            .filter(_post_visibility_filter(viewer)) \
+            .select_related('author').prefetch_related('images', 'hashtags', 'reactions', 'comments')
+        if q:
+            posts_qs = posts_qs.filter(body__icontains=q)
+        if hashtag:
+            posts_qs = posts_qs.filter(hashtags__tag=hashtag).distinct()
+
+        acts_qs = FeedActivity.objects.filter(user_id__in=allowed_ids).select_related('user')
+        # Search and hashtag filters only apply to posts; if either is set, hide activities entirely.
+        include_activities = not q and not hashtag
+
+        WINDOW = page * page_size + 50
+        posts = list(posts_qs.order_by('-created_at')[:WINDOW])
+        acts = list(acts_qs.order_by('-created_at')[:WINDOW]) if include_activities else []
+
+        items = [('post', p.created_at, p) for p in posts] + [(a.kind, a.created_at, a) for a in acts]
+        items.sort(key=lambda t: t[1], reverse=True)
+
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_items = items[start:end]
+        has_next = len(items) > end
+
+        ctx = {'request': request, 'viewer_id': viewer_id}
+        results = []
+        for kind, created_at, obj in page_items:
+            if kind == 'post':
+                results.append({'kind': 'post', 'created_at': created_at, 'post': PostSerializer(obj, context=ctx).data})
+            else:
+                results.append({'kind': obj.kind, 'created_at': created_at, 'activity': FeedActivitySerializer(obj).data})
+        return Response({
+            'results': results, 'has_next': has_next, 'page': page,
+            'audience': audience, 'q': q, 'hashtag': hashtag,
+        })
+
+    @action(detail=False, methods=['get'], url_path='hashtags')
+    def hashtags(self, request):
+        """Return top hashtags (categories) by post count, restricted to posts the viewer can see."""
+        viewer, _ = _resolve_viewer(request)
+        if not viewer:
+            return Response({'error': 'Authentication required'}, status=401)
+        try:
+            limit = max(1, min(50, int(request.query_params.get('limit', '20'))))
+        except (TypeError, ValueError):
+            limit = 20
+
+        visible_post_ids = Post.objects.filter(is_deleted=False).filter(_post_visibility_filter(viewer)).values_list('id', flat=True)
+        rows = (
+            PostHashtag.objects
+            .filter(post_id__in=visible_post_ids)
+            .values('tag')
+            .annotate(post_count=Count('id', distinct=True))
+            .order_by('-post_count', 'tag')[:limit]
+        )
+        return Response([{'tag': r['tag'], 'count': r['post_count']} for r in rows])

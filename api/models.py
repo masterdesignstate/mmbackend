@@ -30,6 +30,10 @@ class User(AbstractUser):
     restriction_reason_detail = models.TextField(blank=True, default='', help_text="Additional description for the restriction reason")
     restriction_date = models.DateTimeField(null=True, blank=True)
     questions_answered_count = models.PositiveIntegerField(default=0)
+    require_answers_for_likes = models.BooleanField(
+        default=False,
+        help_text="If true, other users can only like this user after answering all of this user's required questions",
+    )
 
     @property
     def is_online(self):
@@ -365,6 +369,136 @@ class Message(models.Model):
 
     def __str__(self):
         return f"{self.sender.username} -> {self.receiver.username}"
+
+
+class Post(models.Model):
+    """A user-authored feed post (text + up to 5 images)."""
+    VISIBILITY_CHOICES = [
+        ('all', 'Everyone'),
+        ('approved', 'Approved'),
+        ('liked', 'Liked'),
+        ('matched', 'Matches'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    author = models.ForeignKey(User, on_delete=models.CASCADE, related_name='posts')
+    body = models.TextField(max_length=2000)
+    visibility = models.CharField(max_length=16, choices=VISIBILITY_CHOICES, default='all')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_deleted = models.BooleanField(default=False)
+    edited_count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['-created_at'])]
+
+    def __str__(self):
+        return f"Post by {self.author.username} @ {self.created_at:%Y-%m-%d}"
+
+
+class PostImage(models.Model):
+    """Image attached to a post (max 5 per post)."""
+    MAX_PER_POST = 5
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='images')
+    image_url = models.URLField(max_length=500)
+    order = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['order']
+        unique_together = [('post', 'order')]
+
+
+class PostHashtag(models.Model):
+    """Hashtag extracted from a post body (visual-only for now)."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='hashtags')
+    tag = models.CharField(max_length=64, db_index=True)
+
+    class Meta:
+        unique_together = [('post', 'tag')]
+
+
+class PostRevision(models.Model):
+    """Snapshot of a post body BEFORE each edit; newest first."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='revisions')
+    body = models.TextField(max_length=2000)
+    edited_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-edited_at']
+
+
+class PostReaction(models.Model):
+    """Like or dislike on a post — one reaction per (user, post)."""
+    KIND_CHOICES = [('like', 'Like'), ('dislike', 'Dislike')]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='post_reactions')
+    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='reactions')
+    kind = models.CharField(max_length=8, choices=KIND_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [('user', 'post')]
+
+
+class PostComment(models.Model):
+    """A single-level comment on a post."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='comments')
+    author = models.ForeignKey(User, on_delete=models.CASCADE, related_name='post_comments')
+    body = models.TextField(max_length=1000)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_deleted = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['created_at']
+
+
+class FeedActivity(models.Model):
+    """System-generated activity item shown alongside posts in the feed."""
+    KIND_CHOICES = [
+        ('bio_updated', 'Bio updated'),
+        ('photo_added', 'Photo added'),
+        ('question_answered', 'Question answered'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='feed_activities')
+    kind = models.CharField(max_length=32, choices=KIND_CHOICES)
+    payload = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['-created_at']),
+            models.Index(fields=['user', '-created_at']),
+        ]
+
+
+class UserPicture(models.Model):
+    """A photo in a user's gallery (up to 5 per user; order 0 is the primary thumbnail)."""
+    MAX_PER_USER = 5
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='pictures')
+    image_url = models.URLField(max_length=500)
+    order = models.PositiveSmallIntegerField(default=0, help_text="0 = primary thumbnail")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['order', 'created_at']
+        unique_together = [('user', 'order')]
+
+    def __str__(self):
+        return f"{self.user.username} pic #{self.order}"
 
 
 class PictureModeration(models.Model):

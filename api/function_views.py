@@ -89,19 +89,28 @@ def user_signup(request):
         
         print(f"✅ No existing user found, proceeding with creation")
         
+        # Admin/test bypass: the magic code "888888" lets any signup through
+        # without consuming a real InviteCode. Reusable for QA.
+        ADMIN_BYPASS_CODE = '888888'
+        is_bypass = alpha_code == ADMIN_BYPASS_CODE
+
         # Create the user
         with transaction.atomic():
             print(f"🔒 Starting database transaction")
 
-            try:
-                invite = InviteCode.objects.select_for_update().get(
-                    code=alpha_code, is_used=False
-                )
-            except InviteCode.DoesNotExist:
-                print(f"❌ Invalid or already used invite code: {alpha_code}")
-                return JsonResponse({
-                    'error': 'Invalid or already used invite code'
-                }, status=400)
+            invite = None
+            if not is_bypass:
+                try:
+                    invite = InviteCode.objects.select_for_update().get(
+                        code=alpha_code, is_used=False
+                    )
+                except InviteCode.DoesNotExist:
+                    print(f"❌ Invalid or already used invite code: {alpha_code}")
+                    return JsonResponse({
+                        'error': 'Invalid or already used invite code'
+                    }, status=400)
+            else:
+                print(f"🛠️  Admin bypass code used — skipping InviteCode validation")
 
             user = User.objects.create(
                 username=email,  # Use email as username for now
@@ -111,11 +120,12 @@ def user_signup(request):
                 date_joined=timezone.now()
             )
 
-            invite.is_used = True
-            invite.used_by = user
-            invite.used_at = timezone.now()
-            invite.save(update_fields=['is_used', 'used_by', 'used_at'])
-            print(f"🎟️  Invite code {invite.code} redeemed by user {user.id}")
+            if invite is not None:
+                invite.is_used = True
+                invite.used_by = user
+                invite.used_at = timezone.now()
+                invite.save(update_fields=['is_used', 'used_by', 'used_at'])
+                print(f"🎟️  Invite code {invite.code} redeemed by user {user.id}")
 
             print(f"✅ USER CREATED successfully!")
             print(f"   User ID: {user.id}")

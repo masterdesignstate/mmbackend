@@ -1,7 +1,8 @@
 from rest_framework import serializers
 from .models import (
     User, Tag, Question, UserAnswer, UserRequiredQuestion, Compatibility,
-    UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, QuestionAnswer, Controls, Notification, Conversation
+    UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, QuestionAnswer, Controls, Notification, Conversation,
+    Post, PostImage, PostHashtag, PostRevision, PostReaction, PostComment, FeedActivity,
 )
 
 
@@ -11,6 +12,14 @@ class TagSerializer(serializers.ModelSerializer):
         fields = ['id', 'name']
 
 
+class UserPictureSerializer(serializers.ModelSerializer):
+    class Meta:
+        from .models import UserPicture
+        model = UserPicture
+        fields = ['id', 'image_url', 'order', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+
 class UserSerializer(serializers.ModelSerializer):
     online_status = serializers.SerializerMethodField()
     question_answers = serializers.SerializerMethodField()
@@ -18,6 +27,7 @@ class UserSerializer(serializers.ModelSerializer):
     date_joined = serializers.DateTimeField(read_only=True)
     is_banned = serializers.BooleanField(read_only=True)
     is_online = serializers.SerializerMethodField()
+    pictures = UserPictureSerializer(many=True, read_only=True)
 
     class Meta:
         model = User
@@ -26,7 +36,8 @@ class UserSerializer(serializers.ModelSerializer):
             'profile_photo', 'age', 'date_of_birth', 'height', 'from_location', 'live', 'tagline', 'bio',
             'is_online', 'last_active', 'questions_answered_count', 'online_status', 'question_answers',
             'date_joined', 'is_banned', 'is_admin', 'mandatory_questions_complete',
-            'restriction_type', 'restriction_duration', 'restriction_reason', 'restriction_reason_detail', 'restriction_date'
+            'restriction_type', 'restriction_duration', 'restriction_reason', 'restriction_reason_detail', 'restriction_date',
+            'require_answers_for_likes', 'pictures',
         ]
         read_only_fields = [
             'id', 'last_active', 'questions_answered_count',
@@ -289,13 +300,15 @@ class DetailedQuestionSerializer(QuestionSerializer):
 class SimpleUserSerializer(serializers.ModelSerializer):
     """Lightweight user serializer for compatibility lists - no nested data"""
     is_online = serializers.SerializerMethodField()
+    pictures = UserPictureSerializer(many=True, read_only=True)
 
     class Meta:
         model = User
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name',
             'profile_photo', 'age', 'date_of_birth', 'height',
-            'from_location', 'live', 'tagline', 'bio', 'is_online', 'last_active', 'is_admin'
+            'from_location', 'live', 'tagline', 'bio', 'is_online', 'last_active', 'is_admin',
+            'require_answers_for_likes', 'pictures',
         ]
 
     def get_is_online(self, obj):
@@ -422,3 +435,82 @@ class ConversationSerializer(serializers.ModelSerializer):
             else:
                 return SimpleUserSerializer(obj.participant1).data
         return None
+
+
+# ===== Feed: Posts, Comments, Activities =====
+
+class PostImageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PostImage
+        fields = ['id', 'image_url', 'order']
+
+
+class PostCommentSerializer(serializers.ModelSerializer):
+    author = SimpleUserSerializer(read_only=True)
+
+    class Meta:
+        model = PostComment
+        fields = ['id', 'post', 'author', 'body', 'created_at', 'updated_at', 'is_deleted']
+        read_only_fields = ['id', 'author', 'created_at', 'updated_at', 'is_deleted']
+
+
+class PostRevisionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PostRevision
+        fields = ['id', 'body', 'edited_at']
+
+
+class PostSerializer(serializers.ModelSerializer):
+    author = SimpleUserSerializer(read_only=True)
+    images = PostImageSerializer(many=True, read_only=True)
+    hashtags = serializers.SerializerMethodField()
+    reaction_summary = serializers.SerializerMethodField()
+    viewer_reaction = serializers.SerializerMethodField()
+    comment_count = serializers.SerializerMethodField()
+    is_own = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Post
+        fields = [
+            'id', 'author', 'body', 'visibility', 'created_at', 'updated_at', 'edited_count',
+            'images', 'hashtags', 'reaction_summary', 'viewer_reaction',
+            'comment_count', 'is_own',
+        ]
+        read_only_fields = fields
+
+    def get_hashtags(self, obj):
+        return list(obj.hashtags.values_list('tag', flat=True))
+
+    def get_reaction_summary(self, obj):
+        # Return counts keyed by kind. Falls back to 0 for missing keys.
+        from django.db.models import Count
+        counts = dict(obj.reactions.values('kind').annotate(c=Count('id')).values_list('kind', 'c'))
+        return {'like': counts.get('like', 0), 'dislike': counts.get('dislike', 0)}
+
+    def _viewer_id(self):
+        request = self.context.get('request')
+        if not request:
+            return None
+        return self.context.get('viewer_id') or (str(request.user.id) if request.user and request.user.is_authenticated else None)
+
+    def get_viewer_reaction(self, obj):
+        viewer_id = self._viewer_id()
+        if not viewer_id:
+            return None
+        r = obj.reactions.filter(user_id=viewer_id).first()
+        return r.kind if r else None
+
+    def get_comment_count(self, obj):
+        return obj.comments.filter(is_deleted=False).count()
+
+    def get_is_own(self, obj):
+        viewer_id = self._viewer_id()
+        return bool(viewer_id and str(obj.author_id) == str(viewer_id))
+
+
+class FeedActivitySerializer(serializers.ModelSerializer):
+    user = SimpleUserSerializer(read_only=True)
+
+    class Meta:
+        model = FeedActivity
+        fields = ['id', 'user', 'kind', 'payload', 'created_at']
