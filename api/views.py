@@ -1247,8 +1247,11 @@ class UserViewSet(viewsets.ModelViewSet):
             # When current_user is user1: My Required = user2_completeness, Their Required = user1_completeness
             # When current_user is user2: My Required = user1_completeness, Their Required = user2_completeness
 
-            # Compute per-user required mutual counts from UserRequiredQuestion and UserAnswer
+            # Compute per-user required mutual counts and scoped scores from
+            # UserRequiredQuestion and UserAnswer. The stored Compatibility
+            # columns only keep a subset of the scoped directional scores.
             from .models import UserRequiredQuestion, UserAnswer
+            from .services.compatibility_service import CompatibilityService
             current_user_id = user_id
             other_user_id_val = other_user_id
 
@@ -1264,6 +1267,40 @@ class UserViewSet(viewsets.ModelViewSet):
             other_answered_qids = set(
                 UserAnswer.objects.filter(user_id=other_user_id_val).values_list('question_id', flat=True)
             )
+            current_answers = list(
+                UserAnswer.objects.filter(user_id=current_user_id).select_related('question')
+            )
+            other_answers = list(
+                UserAnswer.objects.filter(user_id=other_user_id_val).select_related('question')
+            )
+            current_answer_map = {answer.question_id: answer for answer in current_answers}
+            other_answer_map = {answer.question_id: answer for answer in other_answers}
+
+            def scoped_required_scores(required_qids):
+                current_scope_answers = {
+                    qid: current_answer_map[qid]
+                    for qid in required_qids
+                    if qid in current_answer_map
+                }
+                other_scope_answers = {
+                    qid: other_answer_map[qid]
+                    for qid in required_qids
+                    if qid in other_answer_map
+                }
+                compatible_with_me, im_compatible_with, overall, _ = (
+                    CompatibilityService._compute_scores_from_answer_maps(
+                        current_scope_answers,
+                        other_scope_answers,
+                    )
+                )
+                return {
+                    'compatible_with_me': compatible_with_me,
+                    'im_compatible_with': im_compatible_with,
+                    'overall_compatibility': overall,
+                }
+
+            my_required_scores = scoped_required_scores(current_required_qids)
+            their_required_scores = scoped_required_scores(other_required_qids)
 
             # "My Required" count: how many of MY required questions have BOTH of us answered
             my_required_mutual = len(current_required_qids & current_answered_qids & other_answered_qids)
@@ -1287,6 +1324,15 @@ class UserViewSet(viewsets.ModelViewSet):
                 'required_compatible_with_me': compatibility.required_compatible_with_me if is_user1 else compatibility.required_im_compatible_with,
                 'required_im_compatible_with': compatibility.required_im_compatible_with if is_user1 else compatibility.required_compatible_with_me,
                 'their_required_compatibility': compatibility.their_required_compatibility if is_user1 else compatibility.required_compatible_with_me,
+                # Scoped required compatibility from the requesting user's perspective.
+                # My Required = only questions current user marked required.
+                'my_required_overall_compatibility': my_required_scores['overall_compatibility'],
+                'my_required_compatible_with_me': my_required_scores['compatible_with_me'],
+                'my_required_im_compatible_with': my_required_scores['im_compatible_with'],
+                # Their Required = only questions the viewed profile user marked required.
+                'their_required_overall_compatibility': their_required_scores['overall_compatibility'],
+                'their_required_compatible_with_me': their_required_scores['compatible_with_me'],
+                'their_required_im_compatible_with': their_required_scores['im_compatible_with'],
                 'required_mutual_questions_count': compatibility.required_mutual_questions_count,
                 # Per-user required mutual counts for proper X/Y fractions
                 'my_required_mutual_count': my_required_mutual,
@@ -3860,6 +3906,32 @@ def _post_visibility_filter(viewer):
     )
 
 
+def _activity_visibility_filter(viewer):
+    """Q expression filtering FeedActivity rows visible to `viewer`
+    based on each author's per-kind feed_visibility_* setting."""
+    authors_approving_me = list(UserResult.objects.filter(result_user=viewer, tag='approve').values_list('user_id', flat=True))
+    authors_liking_me = list(UserResult.objects.filter(result_user=viewer, tag='like').values_list('user_id', flat=True))
+    my_likes = set(UserResult.objects.filter(user=viewer, tag='like').values_list('result_user_id', flat=True))
+    authors_matching_me = list(set(authors_liking_me) & my_likes)
+
+    per_kind = [
+        ('bio_updated', 'feed_visibility_bio'),
+        ('photo_added', 'feed_visibility_photo'),
+        ('question_answered', 'feed_visibility_question'),
+    ]
+    kind_q = Q()
+    for kind, field in per_kind:
+        kind_q |= Q(kind=kind) & (
+            Q(**{f'user__{field}': 'all'}) |
+            Q(**{f'user__{field}': 'approved'}, user_id__in=authors_approving_me) |
+            Q(**{f'user__{field}': 'liked'}, user_id__in=authors_liking_me) |
+            Q(**{f'user__{field}': 'matched'}, user_id__in=authors_matching_me)
+        )
+        # 'none' is implicitly excluded for non-viewer authors
+
+    return Q(user_id=viewer.id) | kind_q  # author always sees own activities
+
+
 class FeedView(viewsets.ViewSet):
     """GET /api/feed/ — feed list. Query params:
     - audience: all|matches|approved|liked (viewer's filter)
@@ -3897,7 +3969,9 @@ class FeedView(viewsets.ViewSet):
         if hashtag:
             posts_qs = posts_qs.filter(hashtags__tag=hashtag).distinct()
 
-        acts_qs = FeedActivity.objects.filter(user_id__in=allowed_ids).select_related('user')
+        acts_qs = FeedActivity.objects.filter(user_id__in=allowed_ids) \
+            .filter(_activity_visibility_filter(viewer)) \
+            .select_related('user')
         # Search and hashtag filters only apply to posts; if either is set, hide activities entirely.
         include_activities = not q and not hashtag
 

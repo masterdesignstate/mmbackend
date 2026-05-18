@@ -37,7 +37,9 @@ class UserSerializer(serializers.ModelSerializer):
             'is_online', 'last_active', 'questions_answered_count', 'online_status', 'question_answers',
             'date_joined', 'is_banned', 'is_admin', 'mandatory_questions_complete',
             'restriction_type', 'restriction_duration', 'restriction_reason', 'restriction_reason_detail', 'restriction_date',
-            'require_answers_for_likes', 'pictures',
+            'require_answers_for_likes',
+            'feed_visibility_bio', 'feed_visibility_photo', 'feed_visibility_question',
+            'pictures',
         ]
         read_only_fields = [
             'id', 'last_active', 'questions_answered_count',

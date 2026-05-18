@@ -5,6 +5,15 @@ from django.utils import timezone
 import uuid
 
 
+FEED_VISIBILITY_CHOICES = [
+    ('none', 'None'),
+    ('all', 'Everyone'),
+    ('approved', 'Approved'),
+    ('liked', 'Liked'),
+    ('matched', 'Matched'),
+]
+
+
 class User(AbstractUser):
     """Extended User model for the dating app"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -33,6 +42,18 @@ class User(AbstractUser):
     require_answers_for_likes = models.BooleanField(
         default=False,
         help_text="If true, other users can only like this user after answering all of this user's required questions",
+    )
+    feed_visibility_bio = models.CharField(
+        max_length=16, choices=FEED_VISIBILITY_CHOICES, default='all',
+        help_text="Who can see this user's bio-update activities in the feed.",
+    )
+    feed_visibility_photo = models.CharField(
+        max_length=16, choices=FEED_VISIBILITY_CHOICES, default='all',
+        help_text="Who can see this user's photo-added activities in the feed.",
+    )
+    feed_visibility_question = models.CharField(
+        max_length=16, choices=FEED_VISIBILITY_CHOICES, default='all',
+        help_text="Who can see this user's question-answered activities in the feed.",
     )
 
     @property

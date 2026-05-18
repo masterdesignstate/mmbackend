@@ -71,8 +71,8 @@ class CompatibilityService:
 
         # Direction A: "Compatible with Me" - How well they fit what I want
         # Compare: My_Them[i] vs Their_Me[i]
-        if my_open_to_all or my_them == 6 or their_me == 6:
-            # Open-to-All rule triggers
+        if (my_open_to_all or my_them == 6 or their_me == 6) and my_importance > 1:
+            # Open-to-All rule triggers only when this preference carries weight
             M_A = adjust_value * ota
             MAX_A = adjust_value
         else:
@@ -84,8 +84,8 @@ class CompatibilityService:
 
         # Direction B: "I'm Compatible with" - How well I fit what they want
         # Compare: My_Me[i] vs Their_Them[i]
-        if their_open_to_all or their_them == 6 or my_me == 6:
-            # Open-to-All rule triggers
+        if (their_open_to_all or their_them == 6 or my_me == 6) and their_importance > 1:
+            # Open-to-All rule triggers only when this preference carries weight
             M_B = adjust_value * ota
             MAX_B = adjust_value
         else:

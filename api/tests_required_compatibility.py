@@ -10,6 +10,7 @@ This test suite verifies that:
 
 from django.test import TestCase
 from django.db import transaction
+from rest_framework.test import APIClient
 from api.models import User, UserAnswer, UserRequiredQuestion, Compatibility, Question, Tag, QuestionNumberCounter
 from api.services.compatibility_service import CompatibilityService
 from django.contrib.auth import get_user_model
@@ -302,3 +303,154 @@ class RequiredCompatibilityTestCase(TestCase):
                                 "Required mutual questions count should be stored")
             self.assertIsNotNone(comp.required_completeness_ratio,
                                 "Required completeness ratio should be stored")
+
+    def test_compatibility_with_returns_scoped_required_scores(self):
+        """The profile endpoint returns both directional scores for each required scope."""
+        user1_q1 = UserAnswer.objects.create(
+            user=self.user1,
+            question=self.required_q1,
+            me_answer=1,
+            looking_for_answer=5,
+            me_importance=3,
+            looking_for_importance=3,
+        )
+        user2_q1 = UserAnswer.objects.create(
+            user=self.user2,
+            question=self.required_q1,
+            me_answer=5,
+            looking_for_answer=1,
+            me_importance=3,
+            looking_for_importance=3,
+        )
+        user1_q2 = UserAnswer.objects.create(
+            user=self.user1,
+            question=self.required_q2,
+            me_answer=1,
+            looking_for_answer=1,
+            me_importance=3,
+            looking_for_importance=3,
+        )
+        user2_q2 = UserAnswer.objects.create(
+            user=self.user2,
+            question=self.required_q2,
+            me_answer=5,
+            looking_for_answer=5,
+            me_importance=3,
+            looking_for_importance=3,
+        )
+        UserRequiredQuestion.objects.get_or_create(user=self.user1, question=self.required_q1)
+        UserRequiredQuestion.objects.get_or_create(user=self.user2, question=self.required_q2)
+
+        result = CompatibilityService.calculate_compatibility_between_users(self.user1, self.user2)
+        Compatibility.objects.create(
+            user1=self.user1,
+            user2=self.user2,
+            overall_compatibility=result['overall_compatibility'],
+            compatible_with_me=result['compatible_with_me'],
+            im_compatible_with=result['im_compatible_with'],
+            mutual_questions_count=result['mutual_questions_count'],
+            required_overall_compatibility=result['required_overall_compatibility'],
+            required_compatible_with_me=result['required_compatible_with_me'],
+            required_im_compatible_with=result['required_im_compatible_with'],
+            their_required_compatibility=result['their_required_compatibility'],
+            required_mutual_questions_count=result['required_mutual_questions_count'],
+        )
+
+        my_expected = CompatibilityService._compute_scores_from_answer_maps(
+            {self.required_q1.id: user1_q1},
+            {self.required_q1.id: user2_q1},
+        )
+        their_expected = CompatibilityService._compute_scores_from_answer_maps(
+            {self.required_q2.id: user1_q2},
+            {self.required_q2.id: user2_q2},
+        )
+
+        response = APIClient().get(
+            '/api/users/compatibility_with/',
+            {
+                'user_id': str(self.user1.id),
+                'other_user_id': str(self.user2.id),
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertAlmostEqual(response.data['my_required_compatible_with_me'], my_expected[0], places=2)
+        self.assertAlmostEqual(response.data['my_required_im_compatible_with'], my_expected[1], places=2)
+        self.assertAlmostEqual(response.data['my_required_overall_compatibility'], my_expected[2], places=2)
+        self.assertAlmostEqual(response.data['their_required_compatible_with_me'], their_expected[0], places=2)
+        self.assertAlmostEqual(response.data['their_required_im_compatible_with'], their_expected[1], places=2)
+        self.assertAlmostEqual(response.data['their_required_overall_compatibility'], their_expected[2], places=2)
+
+
+class CompatibilityOpenToAllScoringTestCase(TestCase):
+    """Test open-to-all scoring behavior in the raw question score helper."""
+
+    constants = {
+        'ADJUST_VALUE': 5.0,
+        'EXPONENT': 2.0,
+        'OTA': 0.5,
+    }
+
+    def test_open_to_all_direction_a_uses_normal_route_when_importance_is_one(self):
+        m_a, max_a, m_b, max_b = CompatibilityService.calculate_question_score(
+            my_them=6,
+            my_importance=1,
+            their_me=3,
+            my_me=4,
+            their_them=4,
+            their_importance=3,
+            my_open_to_all=True,
+            constants=self.constants,
+        )
+
+        self.assertEqual(m_a, 0.0)
+        self.assertEqual(max_a, 0.0)
+        self.assertEqual(m_b, 5.0)
+        self.assertEqual(max_b, 5.0)
+
+    def test_open_to_all_direction_a_uses_ota_when_importance_is_above_one(self):
+        m_a, max_a, _, _ = CompatibilityService.calculate_question_score(
+            my_them=6,
+            my_importance=2,
+            their_me=3,
+            my_me=4,
+            their_them=4,
+            their_importance=3,
+            my_open_to_all=True,
+            constants=self.constants,
+        )
+
+        self.assertEqual(m_a, 2.5)
+        self.assertEqual(max_a, 5.0)
+
+    def test_open_to_all_direction_b_uses_normal_route_when_importance_is_one(self):
+        m_a, max_a, m_b, max_b = CompatibilityService.calculate_question_score(
+            my_them=4,
+            my_importance=3,
+            their_me=4,
+            my_me=3,
+            their_them=6,
+            their_importance=1,
+            their_open_to_all=True,
+            constants=self.constants,
+        )
+
+        self.assertEqual(m_a, 5.0)
+        self.assertEqual(max_a, 5.0)
+        self.assertEqual(m_b, 0.0)
+        self.assertEqual(max_b, 0.0)
+
+    def test_open_to_all_direction_b_uses_ota_when_importance_is_above_one(self):
+        _, _, m_b, max_b = CompatibilityService.calculate_question_score(
+            my_them=4,
+            my_importance=3,
+            their_me=4,
+            my_me=3,
+            their_them=6,
+            their_importance=2,
+            their_open_to_all=True,
+            constants=self.constants,
+        )
+
+        self.assertEqual(m_b, 2.5)
+        self.assertEqual(max_b, 5.0)
