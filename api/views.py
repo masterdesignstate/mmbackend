@@ -13,13 +13,14 @@ logger = logging.getLogger(__name__)
 from .models import (
     User, Tag, Question, UserAnswer, UserRequiredQuestion, Compatibility,
     UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, Controls,
-    CompatibilityJob, Notification, Conversation, UserPicture,
+    Notification, Conversation, UserPicture,
     Post, PostImage, PostHashtag, PostRevision, PostReaction, PostComment, FeedActivity,
 )
 from .services.compatibility_service import CompatibilityService
 from .analytics import capture as posthog_capture
 from .services.compatibility_queue import (
     enqueue_user_for_recalculation,
+    process_user_compatibility_async,
     should_enqueue_after_answer,
     MIN_MATCHABLE_ANSWERS,
 )
@@ -1550,7 +1551,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
             skip_me = request.data.get('skip_me', False)
             skip_looking_for = request.data.get('skip_looking_for', False)
             open_to_all_me = request.data.get('open_to_all_me', False)
-            open_to_all_looking_for = request.data.get('open_to_all_looking_for', False)
+            open_to_all_looking_for = request.data.get('open_to_all_looking_for', True)
             is_group = request.data.get('is_group', False)
             value_label_1 = request.data.get('value_label_1', '').strip()
             value_label_5 = request.data.get('value_label_5', '').strip()
@@ -2102,6 +2103,22 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
     ordering_fields = ['created_at', 'updated_at']
     ordering = ['-created_at']
 
+    @staticmethod
+    def _as_bool(value):
+        if isinstance(value, str):
+            return value.lower() in ('true', '1', 'yes', 'on')
+        return bool(value)
+
+    @staticmethod
+    def _sync_required_question(user, question, required_value=None, required_present=False):
+        if question.is_mandatory:
+            UserRequiredQuestion.objects.get_or_create(user=user, question=question)
+        elif required_present:
+            if UserAnswerViewSet._as_bool(required_value):
+                UserRequiredQuestion.objects.get_or_create(user=user, question=question)
+            else:
+                UserRequiredQuestion.objects.filter(user=user, question=question).delete()
+
     def get_queryset(self):
         queryset = UserAnswer.objects.select_related(
             'question', 'user', 'question__submitted_by'
@@ -2180,13 +2197,12 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
             is_required_for_me = request.data.get('is_required_for_me', False)
 
             # Sync UserRequiredQuestion (required for me is stored there; user can require without answering)
-            # Mandatory questions are always required — don't allow un-requiring them
-            if question.is_mandatory:
-                UserRequiredQuestion.objects.get_or_create(user=user, question=question)
-            elif is_required_for_me:
-                UserRequiredQuestion.objects.get_or_create(user=user, question=question)
-            else:
-                UserRequiredQuestion.objects.filter(user=user, question=question).delete()
+            self._sync_required_question(
+                user,
+                question,
+                required_value=is_required_for_me,
+                required_present=True,
+            )
 
             # Create or update UserAnswer (no longer store is_required_for_me on UserAnswer)
             user_answer, created = UserAnswer.objects.update_or_create(
@@ -2258,29 +2274,7 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
 
             if should_enqueue:
                 enqueue_user_for_recalculation(user, force=force_enqueue)
-
-            if should_enqueue and force_enqueue:
-                try:
-                    print(f"⚡ Inline compatibility recompute starting for user {user.id}", flush=True)
-                    CompatibilityService.recalculate_all_compatibilities(user, use_full_reset=False)
-                    job = getattr(user, 'compatibility_job', None)
-                    if job:
-                        job.attempts = (job.attempts or 0) + 1
-                        job.status = CompatibilityJob.STATUS_COMPLETED
-                        job.error_message = ''
-                        job.last_attempt_at = timezone.now()
-                        job.save(update_fields=['attempts', 'status', 'error_message', 'last_attempt_at', 'updated_at'])
-                    print(f"✅ Inline compatibility recompute finished for user {user.id}", flush=True)
-                except Exception as exc:
-                    print(f"❌ Inline compatibility recompute failed for user {user.id}: {exc}", flush=True)
-                    logger.exception(
-                        "Immediate compatibility recompute failed for user %s: %s",
-                        user.id,
-                        exc,
-                    )
-                    # Leave the job pending for the scheduled worker to pick up
-                    if should_enqueue:
-                        enqueue_user_for_recalculation(user, force=force_enqueue)
+                process_user_compatibility_async(str(user.id))
             
             serializer = self.get_serializer(user_answer)
             status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
@@ -2289,6 +2283,46 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
         except Exception as e:
             return Response({
                 'error': f'Failed to create user answer: {str(e)}'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def update(self, request, *args, **kwargs):
+        """Update an existing answer and keep per-user required state in sync."""
+        try:
+            instance = self.get_object()
+            data = request.data
+
+            self._sync_required_question(
+                instance.user,
+                instance.question,
+                required_value=data.get('is_required_for_me'),
+                required_present='is_required_for_me' in data,
+            )
+
+            for field in [
+                'me_answer',
+                'me_open_to_all',
+                'me_importance',
+                'me_share',
+                'looking_for_answer',
+                'looking_for_open_to_all',
+                'looking_for_importance',
+                'looking_for_share',
+            ]:
+                if field in data:
+                    setattr(instance, field, data.get(field))
+
+            instance.save()
+
+            user = instance.user
+            if (user.questions_answered_count or 0) >= MIN_MATCHABLE_ANSWERS:
+                enqueue_user_for_recalculation(user, force=True)
+                process_user_compatibility_async(str(user.id))
+
+            serializer = self.get_serializer(instance)
+            return Response(serializer.data)
+        except Exception as e:
+            return Response({
+                'error': f'Failed to update user answer: {str(e)}'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def perform_create(self, serializer):
@@ -2339,13 +2373,10 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
         User.objects.filter(id=user.id).update(questions_answered_count=actual_count)
         user.refresh_from_db()
 
-        # Trigger compatibility recalculation
+        # Queue compatibility recalculation; the job processor handles the expensive work.
         if (user.questions_answered_count or 0) >= MIN_MATCHABLE_ANSWERS:
             enqueue_user_for_recalculation(user, force=True)
-            try:
-                CompatibilityService.recalculate_all_compatibilities(user, use_full_reset=False)
-            except Exception as exc:
-                logger.exception("Compatibility recompute failed after undo for user %s: %s", user.id, exc)
+            process_user_compatibility_async(str(user.id))
 
         return Response({'deleted_count': deleted_count, 'questions_answered_count': user.questions_answered_count})
 
@@ -2383,13 +2414,10 @@ class UserRequiredQuestionViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Question not found'}, status=status.HTTP_404_NOT_FOUND)
         obj, created = UserRequiredQuestion.objects.get_or_create(user=user, question=question)
 
-        # Trigger recalculation since required set changed
+        # Queue recalculation since the required set changed.
         if created and (user.questions_answered_count or 0) >= MIN_MATCHABLE_ANSWERS:
             enqueue_user_for_recalculation(user, force=True)
-            try:
-                CompatibilityService.recalculate_all_compatibilities(user, use_full_reset=False)
-            except Exception:
-                logger.exception("Required question recalc failed for user %s", user.id)
+            process_user_compatibility_async(str(user.id))
 
         serializer = self.get_serializer(obj)
         return Response(serializer.data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
@@ -2399,10 +2427,7 @@ class UserRequiredQuestionViewSet(viewsets.ModelViewSet):
         instance.delete()
         if (user.questions_answered_count or 0) >= MIN_MATCHABLE_ANSWERS:
             enqueue_user_for_recalculation(user, force=True)
-            try:
-                CompatibilityService.recalculate_all_compatibilities(user, use_full_reset=False)
-            except Exception:
-                logger.exception("Required question removal recalc failed for user %s", user.id)
+            process_user_compatibility_async(str(user.id))
 
 
 class CompatibilityViewSet(viewsets.ReadOnlyModelViewSet):
