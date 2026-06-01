@@ -2,7 +2,8 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 from .models import (
     User, Tag, Question, QuestionAnswer, UserAnswer, Compatibility,
-    UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, DailyMetric, RestrictedWord
+    UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, DailyMetric, RestrictedWord,
+    PromptTemplate, UserProfilePrompt, PromptPollVote,
 )
 
 # Custom User Admin with search functionality
@@ -23,7 +24,7 @@ class CustomUserAdmin(UserAdmin):
     # Customize the form fields
     fieldsets = UserAdmin.fieldsets + (
         ('Dating Profile', {
-            'fields': ('profile_photo', 'age', 'date_of_birth', 'height', 'from_location', 'live', 'bio')
+            'fields': ('profile_photo', 'age', 'date_of_birth', 'height', 'from_location', 'live', 'bio', 'share_answers')
         }),
         ('Status', {
             'fields': ('last_active', 'is_banned', 'ban_reason', 'ban_date', 'questions_answered_count')
@@ -87,4 +88,7 @@ admin.site.register(Message)
 admin.site.register(PictureModeration)
 admin.site.register(UserReport)
 admin.site.register(UserOnlineStatus)
-admin.site.register(DailyMetric) 
+admin.site.register(DailyMetric)
+admin.site.register(PromptTemplate)
+admin.site.register(UserProfilePrompt)
+admin.site.register(PromptPollVote)

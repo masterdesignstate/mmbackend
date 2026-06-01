@@ -1,6 +1,7 @@
 from rest_framework import viewsets, permissions, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from django.db import transaction
 from django.db.models import Q, Count, F, Exists, OuterRef
 from django.utils import timezone
 from datetime import timedelta
@@ -15,6 +16,7 @@ from .models import (
     UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, Controls,
     Notification, Conversation, UserPicture,
     Post, PostImage, PostHashtag, PostRevision, PostReaction, PostComment, FeedActivity,
+    PromptTemplate, UserProfilePrompt, PromptPollVote,
 )
 from .services.compatibility_service import CompatibilityService
 from .analytics import capture as posthog_capture
@@ -30,6 +32,7 @@ from .serializers import (
     PictureModerationSerializer, UserReportSerializer, UserOnlineStatusSerializer,
     DetailedUserSerializer, DetailedQuestionSerializer, UserTagSerializer,
     SimpleUserSerializer, ControlsSerializer, NotificationSerializer, ConversationSerializer,
+    PromptTemplateSerializer, UserProfilePromptSerializer, PromptPollVoteSerializer,
 )
 from .permissions import IsDashboardAdmin
 
@@ -1434,6 +1437,296 @@ class UserViewSet(viewsets.ModelViewSet):
             'success': True,
             'message': 'Password updated successfully'
         })
+
+
+class PromptTemplateViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = PromptTemplateSerializer
+    permission_classes = [permissions.AllowAny]
+    queryset = PromptTemplate.objects.filter(is_active=True).order_by('order', 'text')
+
+
+class UserProfilePromptViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = UserProfilePromptSerializer
+    permission_classes = [permissions.AllowAny]
+
+    def get_queryset(self):
+        queryset = UserProfilePrompt.objects.filter(is_active=True).select_related('template', 'user').prefetch_related('poll_votes__voter')
+        user_id = self.request.query_params.get('user_id')
+        if user_id:
+            queryset = queryset.filter(user_id=user_id)
+        return queryset.order_by('order', 'created_at')
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        viewer_id = self.request.query_params.get('viewer_id') or self.request.data.get('viewer_id')
+        owner_id = self.request.query_params.get('owner_id') or self.request.query_params.get('user_id')
+        include_votes = self.request.query_params.get('include_votes', 'false').lower() == 'true'
+        if viewer_id:
+            context['viewer_id'] = viewer_id
+        if owner_id:
+            context['owner_id'] = owner_id
+        context['include_poll_votes'] = include_votes
+        return context
+
+    def _validate_prompt_payloads(self, prompt_payloads):
+        if not isinstance(prompt_payloads, list):
+            return 'Prompts must be provided as a list.'
+        if len(prompt_payloads) > UserProfilePrompt.MAX_PER_USER:
+            return 'You can add up to 6 prompts: 3 written, 1 voice, 1 video, and 1 poll.'
+
+        type_counts = defaultdict(int)
+        normalized = []
+        text_fields = {}
+        template_ids = set()
+
+        for index, item in enumerate(prompt_payloads):
+            if not isinstance(item, dict):
+                return 'Each prompt must be an object.'
+
+            template_id = item.get('template_id') or item.get('template')
+            prompt_type = item.get('prompt_type')
+            if not template_id or prompt_type not in {'written', 'voice', 'video', 'poll'}:
+                return 'Each prompt needs a template_id and valid prompt_type.'
+            if not PromptTemplate.objects.filter(id=template_id, is_active=True).exists():
+                return 'One or more selected prompts are not available.'
+            if str(template_id) in template_ids:
+                return 'Each selected prompt must be unique.'
+            template_ids.add(str(template_id))
+
+            type_counts[prompt_type] += 1
+            if prompt_type == 'written' and type_counts[prompt_type] > UserProfilePrompt.MAX_WRITTEN_PER_USER:
+                return 'You can use at most 3 written prompts.'
+            if prompt_type in {'voice', 'video', 'poll'} and type_counts[prompt_type] > 1:
+                return 'You can use at most one voice prompt, one video prompt, and one poll prompt.'
+
+            written_answer = (item.get('written_answer') or '').strip()
+            media_url = (item.get('media_url') or '').strip()
+            poll_options = item.get('poll_options') or []
+            duration = item.get('media_duration_seconds')
+
+            if prompt_type == 'written':
+                if not written_answer:
+                    return 'Written prompts need an answer.'
+                if len(written_answer) > UserProfilePrompt.MAX_WRITTEN_CHARS:
+                    return 'Written prompt answers must be 150 characters or fewer.'
+                text_fields[f'written_prompt_{index}'] = written_answer
+                media_url = ''
+                duration = None
+                poll_options = []
+            elif prompt_type in {'voice', 'video'}:
+                if not media_url:
+                    return 'Voice and video prompts need uploaded media.'
+                try:
+                    duration_value = float(duration)
+                except (TypeError, ValueError):
+                    return 'Voice and video prompts need a valid duration.'
+                if duration_value <= 0 or duration_value > UserProfilePrompt.MAX_MEDIA_SECONDS:
+                    return 'Voice and video prompts must be 30 seconds or shorter.'
+                written_answer = ''
+                poll_options = []
+                duration = round(duration_value, 2)
+            else:
+                if not isinstance(poll_options, list) or len(poll_options) != UserProfilePrompt.POLL_OPTION_COUNT:
+                    return 'Poll prompts need exactly 3 options.'
+                cleaned_options = []
+                for option_index, option in enumerate(poll_options):
+                    option_text = str(option).strip()
+                    if not option_text:
+                        return 'Poll options cannot be empty.'
+                    if len(option_text) > 80:
+                        return 'Poll options must be 80 characters or fewer.'
+                    cleaned_options.append(option_text)
+                    text_fields[f'poll_option_{index}_{option_index}'] = option_text
+                written_answer = ''
+                media_url = ''
+                duration = None
+                poll_options = cleaned_options
+
+            normalized.append({
+                'template_id': template_id,
+                'prompt_type': prompt_type,
+                'order': index,
+                'written_answer': written_answer,
+                'media_url': media_url,
+                'media_duration_seconds': duration,
+                'poll_options': poll_options,
+                'is_active': True,
+            })
+
+        from api.utils.word_filter import validate_text_fields
+        has_restricted, found_words = validate_text_fields(**text_fields)
+        if has_restricted:
+            return f'Your prompts contain restricted words: {", ".join(found_words)}'
+
+        return normalized
+
+    @action(detail=False, methods=['post'], url_path='replace-set')
+    def replace_set(self, request):
+        user_id = request.data.get('user_id')
+        if not user_id:
+            return Response({'error': 'user_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        editor_id = request.data.get('editor_id') or request.data.get('viewer_id')
+        if editor_id and str(editor_id) != str(user_id):
+            return Response({'error': 'You can only edit your own profile prompts.'}, status=status.HTTP_403_FORBIDDEN)
+        if getattr(request.user, 'is_authenticated', False) and str(request.user.id) != str(user_id):
+            return Response({'error': 'You can only edit your own profile prompts.'}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        normalized_or_error = self._validate_prompt_payloads(request.data.get('prompts'))
+        if isinstance(normalized_or_error, str):
+            return Response({'error': normalized_or_error}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            UserProfilePrompt.objects.filter(user=user).delete()
+            created = [
+                UserProfilePrompt.objects.create(user=user, **prompt_data)
+                for prompt_data in normalized_or_error
+            ]
+
+        serializer = self.get_serializer(created, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def _required_like_gate_error(self, voter, owner):
+        if not getattr(owner, 'require_answers_for_likes', False):
+            return None
+        required_qids = set(
+            UserRequiredQuestion.objects.filter(user=owner).values_list('question_id', flat=True)
+        )
+        if not required_qids:
+            return None
+        answered_qids = set(
+            UserAnswer.objects.filter(
+                user=voter, question_id__in=required_qids
+            ).values_list('question_id', flat=True)
+        )
+        if required_qids.issubset(answered_qids):
+            return None
+        return "You must answer all of this user's required questions before you can like them."
+
+    @action(detail=True, methods=['post'], url_path='vote')
+    def vote(self, request, pk=None):
+        prompt = self.get_object()
+        if prompt.prompt_type != 'poll':
+            return Response({'error': 'Only poll prompts can be voted on.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        voter_id = request.data.get('voter_id')
+        if not voter_id:
+            return Response({'error': 'voter_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            voter = User.objects.get(id=voter_id)
+        except User.DoesNotExist:
+            return Response({'error': 'Voter not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if str(voter.id) == str(prompt.user_id):
+            return Response({'error': 'You cannot vote on your own poll.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        gate_message = self._required_like_gate_error(voter, prompt.user)
+        if gate_message:
+            return Response(
+                {'error': 'required_questions_unanswered', 'message': gate_message},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        try:
+            selected_index = int(request.data.get('selected_option_index'))
+        except (TypeError, ValueError):
+            return Response({'error': 'selected_option_index is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        options = prompt.poll_options or []
+        if selected_index < 0 or selected_index >= len(options):
+            return Response({'error': 'selected_option_index is invalid'}, status=status.HTTP_400_BAD_REQUEST)
+
+        comment = (request.data.get('comment') or '').strip()
+        if len(comment) > UserProfilePrompt.MAX_POLL_COMMENT_CHARS:
+            return Response({'error': 'Poll comments must be 200 characters or fewer.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from api.utils.word_filter import validate_text_fields
+        has_restricted, found_words = validate_text_fields(prompt_poll_comment=comment)
+        if has_restricted:
+            return Response(
+                {'error': f'Your comment contains restricted words: {", ".join(found_words)}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            vote, _ = PromptPollVote.objects.update_or_create(
+                prompt=prompt,
+                voter=voter,
+                defaults={
+                    'selected_option_index': selected_index,
+                    'comment': comment,
+                },
+            )
+
+            user_result, like_created = UserResult.objects.get_or_create(
+                user=voter,
+                result_user=prompt.user,
+                tag='like',
+            )
+
+            if like_created:
+                Notification.objects.create(
+                    recipient=prompt.user,
+                    sender=voter,
+                    notification_type='like',
+                    related_user_result=user_result,
+                )
+
+                mutual_like = UserResult.objects.filter(
+                    user=prompt.user,
+                    result_user=voter,
+                    tag='like',
+                ).exists()
+                if mutual_like:
+                    Notification.objects.create(
+                        recipient=voter,
+                        sender=prompt.user,
+                        notification_type='match',
+                        related_user_result=user_result,
+                    )
+                    Notification.objects.create(
+                        recipient=prompt.user,
+                        sender=voter,
+                        notification_type='match',
+                        related_user_result=user_result,
+                    )
+
+            option_text = options[selected_index] if selected_index < len(options) else ''
+            note = f'Voted for "{option_text}"'
+            if comment:
+                note = f'{note}: {comment}'
+            Notification.objects.create(
+                recipient=prompt.user,
+                sender=voter,
+                notification_type='prompt_poll',
+                note=note,
+                related_prompt_poll_vote=vote,
+            )
+
+            if comment:
+                if str(voter.id) < str(prompt.user_id):
+                    p1_id, p2_id = voter.id, prompt.user_id
+                else:
+                    p1_id, p2_id = prompt.user_id, voter.id
+
+                conversation, _ = Conversation.objects.get_or_create(
+                    participant1_id=p1_id,
+                    participant2_id=p2_id,
+                )
+                Message.objects.create(
+                    conversation=conversation,
+                    sender=voter,
+                    receiver=prompt.user,
+                    content=comment,
+                )
+
+        return Response(PromptPollVoteSerializer(vote).data, status=status.HTTP_200_OK)
 
 
 class TagViewSet(viewsets.ReadOnlyModelViewSet):
@@ -3864,10 +4157,17 @@ class PostCommentViewSet(viewsets.ModelViewSet):
     def list(self, request, *args, **kwargs):
         from .serializers import PostCommentSerializer
         post_id = request.query_params.get('post')
+        author_id = request.query_params.get('author_id')
         qs = self.get_queryset()
         if post_id:
             qs = qs.filter(post_id=post_id)
-        qs = qs.order_by('created_at')
+        if author_id:
+            viewer, _ = _resolve_viewer(request)
+            if not viewer:
+                return Response({'error': 'Authentication required'}, status=401)
+            visible_post_ids = Post.objects.filter(is_deleted=False).filter(_post_visibility_filter(viewer)).values_list('id', flat=True)
+            qs = qs.filter(author_id=author_id, post_id__in=visible_post_ids).select_related('author', 'post', 'post__author')
+        qs = qs.order_by('-created_at' if author_id else 'created_at')
         return Response(PostCommentSerializer(qs, many=True).data)
 
     def create(self, request, *args, **kwargs):
@@ -3976,13 +4276,17 @@ class FeedView(viewsets.ViewSet):
             audience = 'all'
         q = (request.query_params.get('q') or '').strip()
         hashtag = (request.query_params.get('hashtag') or '').strip().lower().lstrip('#')
+        author_id = request.query_params.get('author_id')
         try:
             page = max(1, int(request.query_params.get('page', '1')))
             page_size = max(1, min(50, int(request.query_params.get('page_size', '20'))))
         except (TypeError, ValueError):
             page, page_size = 1, 20
 
-        allowed_ids = _resolve_audience_user_ids(viewer, audience)
+        if author_id:
+            allowed_ids = list(User.objects.filter(id=author_id, is_banned=False).values_list('id', flat=True))
+        else:
+            allowed_ids = _resolve_audience_user_ids(viewer, audience)
         if not allowed_ids:
             return Response({'results': [], 'has_next': False, 'page': page, 'audience': audience})
 
@@ -3994,11 +4298,13 @@ class FeedView(viewsets.ViewSet):
         if hashtag:
             posts_qs = posts_qs.filter(hashtags__tag=hashtag).distinct()
 
-        acts_qs = FeedActivity.objects.filter(user_id__in=allowed_ids) \
-            .filter(_activity_visibility_filter(viewer)) \
+        acts_qs = FeedActivity.objects.none() if author_id else (
+            FeedActivity.objects.filter(user_id__in=allowed_ids)
+            .filter(_activity_visibility_filter(viewer))
             .select_related('user')
+        )
         # Search and hashtag filters only apply to posts; if either is set, hide activities entirely.
-        include_activities = not q and not hashtag
+        include_activities = not author_id and not q and not hashtag
 
         WINDOW = page * page_size + 50
         posts = list(posts_qs.order_by('-created_at')[:WINDOW])

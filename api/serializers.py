@@ -3,6 +3,7 @@ from .models import (
     User, Tag, Question, UserAnswer, UserRequiredQuestion, Compatibility,
     UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, QuestionAnswer, Controls, Notification, Conversation,
     Post, PostImage, PostHashtag, PostRevision, PostReaction, PostComment, FeedActivity,
+    PromptTemplate, UserProfilePrompt, PromptPollVote,
 )
 
 
@@ -20,6 +21,81 @@ class UserPictureSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at']
 
 
+class PromptTemplateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PromptTemplate
+        fields = ['id', 'text', 'category', 'is_active', 'order', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+
+class PromptPollVoteSerializer(serializers.ModelSerializer):
+    voter = serializers.SerializerMethodField()
+    selected_option_text = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PromptPollVote
+        fields = [
+            'id', 'prompt', 'voter', 'selected_option_index',
+            'selected_option_text', 'comment', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'prompt', 'voter', 'created_at', 'updated_at']
+
+    def get_voter(self, obj):
+        return {
+            'id': str(obj.voter.id),
+            'username': obj.voter.username,
+            'first_name': obj.voter.first_name,
+            'last_name': obj.voter.last_name,
+            'profile_photo': obj.voter.profile_photo,
+        }
+
+    def get_selected_option_text(self, obj):
+        options = obj.prompt.poll_options or []
+        if 0 <= obj.selected_option_index < len(options):
+            return options[obj.selected_option_index]
+        return ''
+
+
+class UserProfilePromptSerializer(serializers.ModelSerializer):
+    template = PromptTemplateSerializer(read_only=True)
+    template_id = serializers.UUIDField(write_only=True, required=False)
+    viewer_vote = serializers.SerializerMethodField()
+    poll_votes = serializers.SerializerMethodField()
+
+    class Meta:
+        model = UserProfilePrompt
+        fields = [
+            'id', 'user', 'template', 'template_id', 'prompt_type', 'order',
+            'written_answer', 'media_url', 'media_duration_seconds',
+            'poll_options', 'is_active', 'viewer_vote', 'poll_votes',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'user', 'created_at', 'updated_at']
+
+    def get_viewer_vote(self, obj):
+        viewer_id = self.context.get('viewer_id')
+        if not viewer_id or obj.prompt_type != 'poll':
+            return None
+        vote = obj.poll_votes.filter(voter_id=viewer_id).select_related('voter', 'prompt').first()
+        if not vote:
+            return None
+        return PromptPollVoteSerializer(vote).data
+
+    def get_poll_votes(self, obj):
+        owner_id = self.context.get('owner_id')
+        viewer_id = self.context.get('viewer_id')
+        include_votes = self.context.get('include_poll_votes', False)
+        if (
+            not include_votes
+            or obj.prompt_type != 'poll'
+            or str(obj.user_id) != str(owner_id)
+            or str(obj.user_id) != str(viewer_id)
+        ):
+            return []
+        votes = obj.poll_votes.select_related('voter', 'prompt').order_by('-updated_at')
+        return PromptPollVoteSerializer(votes, many=True).data
+
+
 class UserSerializer(serializers.ModelSerializer):
     online_status = serializers.SerializerMethodField()
     question_answers = serializers.SerializerMethodField()
@@ -28,6 +104,7 @@ class UserSerializer(serializers.ModelSerializer):
     is_banned = serializers.BooleanField(read_only=True)
     is_online = serializers.SerializerMethodField()
     pictures = UserPictureSerializer(many=True, read_only=True)
+    profile_prompts = UserProfilePromptSerializer(many=True, read_only=True)
 
     class Meta:
         model = User
@@ -37,9 +114,9 @@ class UserSerializer(serializers.ModelSerializer):
             'is_online', 'last_active', 'questions_answered_count', 'online_status', 'question_answers',
             'date_joined', 'is_banned', 'is_admin', 'mandatory_questions_complete',
             'restriction_type', 'restriction_duration', 'restriction_reason', 'restriction_reason_detail', 'restriction_date',
-            'require_answers_for_likes',
+            'require_answers_for_likes', 'share_answers',
             'feed_visibility_bio', 'feed_visibility_photo', 'feed_visibility_question',
-            'pictures',
+            'pictures', 'profile_prompts',
         ]
         read_only_fields = [
             'id', 'last_active', 'questions_answered_count',
@@ -303,6 +380,7 @@ class SimpleUserSerializer(serializers.ModelSerializer):
     """Lightweight user serializer for compatibility lists - no nested data"""
     is_online = serializers.SerializerMethodField()
     pictures = UserPictureSerializer(many=True, read_only=True)
+    profile_prompts = UserProfilePromptSerializer(many=True, read_only=True)
 
     class Meta:
         model = User
@@ -310,7 +388,7 @@ class SimpleUserSerializer(serializers.ModelSerializer):
             'id', 'username', 'email', 'first_name', 'last_name',
             'profile_photo', 'age', 'date_of_birth', 'height',
             'from_location', 'live', 'tagline', 'bio', 'is_online', 'last_active', 'is_admin',
-            'require_answers_for_likes', 'pictures',
+            'require_answers_for_likes', 'share_answers', 'pictures', 'profile_prompts',
         ]
 
     def get_is_online(self, obj):
@@ -380,10 +458,15 @@ class ChangePasswordSerializer(serializers.Serializer):
 class NotificationSerializer(serializers.ModelSerializer):
     sender = SimpleUserSerializer(read_only=True)
     recipient = SimpleUserSerializer(read_only=True)
+    related_prompt_poll_vote = PromptPollVoteSerializer(read_only=True)
 
     class Meta:
         model = Notification
-        fields = ['id', 'recipient', 'sender', 'notification_type', 'note', 'is_read', 'created_at', 'related_user_result']
+        fields = [
+            'id', 'recipient', 'sender', 'notification_type', 'note',
+            'is_read', 'created_at', 'related_user_result',
+            'related_prompt_poll_vote',
+        ]
         read_only_fields = ['id', 'created_at']
 
 
@@ -449,11 +532,21 @@ class PostImageSerializer(serializers.ModelSerializer):
 
 class PostCommentSerializer(serializers.ModelSerializer):
     author = SimpleUserSerializer(read_only=True)
+    post_preview = serializers.SerializerMethodField()
 
     class Meta:
         model = PostComment
-        fields = ['id', 'post', 'author', 'body', 'created_at', 'updated_at', 'is_deleted']
+        fields = ['id', 'post', 'author', 'body', 'created_at', 'updated_at', 'is_deleted', 'post_preview']
         read_only_fields = ['id', 'author', 'created_at', 'updated_at', 'is_deleted']
+
+    def get_post_preview(self, obj):
+        post = obj.post
+        return {
+            'id': str(post.id),
+            'body': post.body[:180],
+            'created_at': post.created_at,
+            'author': SimpleUserSerializer(post.author).data,
+        }
 
 
 class PostRevisionSerializer(serializers.ModelSerializer):

@@ -5,6 +5,7 @@ from .views import (
     UserRequiredQuestionViewSet, CompatibilityViewSet, UserResultViewSet, MessageViewSet,
     PictureModerationViewSet, UserReportViewSet, UserTagViewSet, StatsViewSet, ControlsViewSet, NotificationViewSet, ConversationViewSet,
     PostViewSet, PostCommentViewSet, FeedView,
+    PromptTemplateViewSet, UserProfilePromptViewSet,
 )
 from .function_views import (
     user_signup, user_personal_details, user_login, check_user_exists, check_onboarding_status, update_profile_photo, upload_photo, test_endpoint, delete_question,
@@ -30,6 +31,8 @@ router.register(r'conversations', ConversationViewSet, basename='conversation')
 router.register(r'posts', PostViewSet, basename='post')
 router.register(r'comments', PostCommentViewSet, basename='comment')
 router.register(r'feed', FeedView, basename='feed')
+router.register(r'prompt-templates', PromptTemplateViewSet, basename='prompt-template')
+router.register(r'profile-prompts', UserProfilePromptViewSet, basename='profile-prompt')
 
 urlpatterns = [
     path('', include(router.urls)),

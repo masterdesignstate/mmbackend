@@ -43,6 +43,10 @@ class User(AbstractUser):
         default=False,
         help_text="If true, other users can only like this user after answering all of this user's required questions",
     )
+    share_answers = models.BooleanField(
+        default=False,
+        help_text="If true, users who can view this user's shared answers can also see their looking-for answers.",
+    )
     feed_visibility_bio = models.CharField(
         max_length=16, choices=FEED_VISIBILITY_CHOICES, default='all',
         help_text="Who can see this user's bio-update activities in the feed.",
@@ -522,6 +526,95 @@ class UserPicture(models.Model):
         return f"{self.user.username} pic #{self.order}"
 
 
+class PromptTemplate(models.Model):
+    """Reusable prompt bank item users can answer with text, voice, video, or poll."""
+    CATEGORY_CHOICES = [
+        ('about', 'About You'),
+        ('values', 'Values'),
+        ('lifestyle', 'Lifestyle'),
+        ('fun', 'Fun'),
+        ('dating', 'Dating'),
+        ('deeper', 'Deeper'),
+        ('opinion', 'Opinion'),
+        ('interactive', 'Interactive'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    text = models.CharField(max_length=160, unique=True)
+    category = models.CharField(max_length=32, choices=CATEGORY_CHOICES, default='about')
+    is_active = models.BooleanField(default=True)
+    order = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['order', 'text']
+
+    def __str__(self):
+        return self.text
+
+
+class UserProfilePrompt(models.Model):
+    """A prompt displayed on a user's profile."""
+    PROMPT_TYPE_CHOICES = [
+        ('written', 'Written'),
+        ('voice', 'Voice'),
+        ('video', 'Video'),
+        ('poll', 'Poll'),
+    ]
+
+    MAX_WRITTEN_PER_USER = 3
+    MAX_PER_USER = 6
+    MAX_WRITTEN_CHARS = 150
+    MAX_MEDIA_SECONDS = 30
+    POLL_OPTION_COUNT = 3
+    MAX_POLL_COMMENT_CHARS = 200
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='profile_prompts')
+    template = models.ForeignKey(PromptTemplate, on_delete=models.PROTECT, related_name='user_prompts')
+    prompt_type = models.CharField(max_length=16, choices=PROMPT_TYPE_CHOICES)
+    order = models.PositiveSmallIntegerField(default=0)
+    written_answer = models.CharField(max_length=MAX_WRITTEN_CHARS, blank=True)
+    media_url = models.URLField(max_length=1000, blank=True)
+    media_duration_seconds = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    poll_options = models.JSONField(default=list, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['order', 'created_at']
+        unique_together = [('user', 'order')]
+        indexes = [
+            models.Index(fields=['user', 'is_active', 'order'], name='profile_prompt_user_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username} {self.prompt_type} prompt #{self.order}"
+
+
+class PromptPollVote(models.Model):
+    """Private vote/comment on a prompt poll."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    prompt = models.ForeignKey(UserProfilePrompt, on_delete=models.CASCADE, related_name='poll_votes')
+    voter = models.ForeignKey(User, on_delete=models.CASCADE, related_name='prompt_poll_votes')
+    selected_option_index = models.PositiveSmallIntegerField()
+    comment = models.TextField(max_length=UserProfilePrompt.MAX_POLL_COMMENT_CHARS, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [('prompt', 'voter')]
+        ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['prompt', 'voter'], name='poll_vote_prompt_voter_idx'),
+            models.Index(fields=['prompt', '-updated_at'], name='poll_vote_prompt_date_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.voter.username} voted on {self.prompt_id}"
+
+
 class PictureModeration(models.Model):
     """Picture moderation queue"""
     STATUS_CHOICES = [
@@ -761,12 +854,13 @@ class RestrictedWord(models.Model):
 
 
 class Notification(models.Model):
-    """Notifications for user actions (approve, like, match)"""
+    """Notifications for user actions (approve, like, match, notes, prompt polls)."""
     NOTIFICATION_TYPE_CHOICES = [
         ('approve', 'Approve'),
         ('like', 'Like'),
         ('match', 'Match'),
         ('note', 'Note'),
+        ('prompt_poll', 'Prompt Poll'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -777,6 +871,13 @@ class Notification(models.Model):
     is_read = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     related_user_result = models.ForeignKey(UserResult, on_delete=models.CASCADE, null=True, blank=True, related_name='notifications')
+    related_prompt_poll_vote = models.ForeignKey(
+        PromptPollVote,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='notifications',
+    )
 
     class Meta:
         db_table = 'notifications'
