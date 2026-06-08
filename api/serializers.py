@@ -1,10 +1,11 @@
 from rest_framework import serializers
 from .models import (
-    User, Tag, Question, UserAnswer, UserRequiredQuestion, Compatibility,
+    User, UserRestrictionHistory, Tag, Question, UserAnswer, UserRequiredQuestion, Compatibility,
     UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, QuestionAnswer, Controls, Notification, Conversation,
     Post, PostImage, PostHashtag, PostRevision, PostReaction, PostComment, FeedActivity,
     PromptTemplate, UserProfilePrompt, PromptPollVote,
 )
+from .utils.admin_utils import profile_answer_key
 
 
 class TagSerializer(serializers.ModelSerializer):
@@ -19,6 +20,16 @@ class UserPictureSerializer(serializers.ModelSerializer):
         model = UserPicture
         fields = ['id', 'image_url', 'order', 'created_at']
         read_only_fields = ['id', 'created_at']
+
+
+class UserRestrictionHistorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserRestrictionHistory
+        fields = [
+            'id', 'restriction_type', 'duration_days', 'reason', 'reason_detail',
+            'restricted_at', 'expires_at', 'ended_at', 'end_reason', 'moderator_notes',
+        ]
+        read_only_fields = fields
 
 
 class PromptTemplateSerializer(serializers.ModelSerializer):
@@ -156,31 +167,17 @@ class UserSerializer(serializers.ModelSerializer):
             return None
 
     def get_question_answers(self, obj):
-        """Get answers for specific questions by question number"""
-        # Get answers for questions 1-6 (Male, Female, Friend, Hookup, Date, Partner)
+        """Get key profile answers for grouped onboarding questions."""
         answers = UserAnswer.objects.filter(
             user=obj,
-            question__question_number__in=[1, 2, 3, 4, 5, 6]
-        ).select_related('question').values(
-            'question__question_number',
-            'me_answer'
-        )
+            question__question_number__in=[1, 2]
+        ).select_related('question')
 
-        # Map to question names
         answer_map = {}
         for answer in answers:
-            qnum = answer['question__question_number']
-            # Map question numbers to their names
-            question_names = {
-                1: 'male',
-                2: 'female',
-                3: 'friend',
-                4: 'hookup',
-                5: 'date',
-                6: 'partner'
-            }
-            if qnum in question_names:
-                answer_map[question_names[qnum]] = answer['me_answer']
+            key = profile_answer_key(answer.question)
+            if key:
+                answer_map[key] = answer.me_answer
 
         return answer_map
 
@@ -238,13 +235,31 @@ class UserAnswerSerializer(serializers.ModelSerializer):
     question = LightQuestionSerializer(read_only=True)
     user_id = serializers.UUIDField(source='user.id', read_only=True)
 
+    def validate_excluded_answer_values(self, value):
+        if value in (None, ''):
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError('Excluded answer values must be a list.')
+
+        normalized = []
+        for raw_value in value:
+            try:
+                answer_value = int(raw_value)
+            except (TypeError, ValueError):
+                raise serializers.ValidationError('Excluded answer values must be integers from 1 to 5.')
+            if answer_value < 1 or answer_value > 5:
+                raise serializers.ValidationError('Excluded answer values must be integers from 1 to 5.')
+            if answer_value not in normalized:
+                normalized.append(answer_value)
+        return normalized
+
     class Meta:
         model = UserAnswer
         fields = [
             'id', 'user_id', 'question', 'me_answer', 'me_open_to_all',
             'me_importance', 'me_share', 'looking_for_answer',
             'looking_for_open_to_all', 'looking_for_importance',
-            'looking_for_share', 'created_at', 'updated_at'
+            'looking_for_share', 'excluded_answer_values', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'user_id', 'created_at', 'updated_at']
 
@@ -363,9 +378,10 @@ class UserTagSerializer(serializers.ModelSerializer):
 # Nested serializers for detailed views
 class DetailedUserSerializer(UserSerializer):
     answers = UserAnswerSerializer(many=True, read_only=True)
+    restriction_history = UserRestrictionHistorySerializer(many=True, read_only=True)
     
     class Meta(UserSerializer.Meta):
-        fields = UserSerializer.Meta.fields + ['answers']
+        fields = UserSerializer.Meta.fields + ['answers', 'restriction_history']
 
 
 class DetailedQuestionSerializer(QuestionSerializer):

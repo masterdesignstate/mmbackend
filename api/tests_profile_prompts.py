@@ -8,7 +8,6 @@ from api.models import (
     PromptPollVote,
     PromptTemplate,
     Question,
-    UserAnswer,
     UserProfilePrompt,
     UserRequiredQuestion,
     UserResult,
@@ -173,7 +172,7 @@ class ProfilePromptApiTests(TestCase):
         owner_poll_data = [item for item in owner_items if item['prompt_type'] == 'poll'][0]
         self.assertEqual(len(owner_poll_data['poll_votes']), 1)
 
-    def test_poll_vote_respects_required_question_like_gate(self):
+    def test_poll_vote_ignores_required_question_like_gate(self):
         self.owner.require_answers_for_likes = True
         self.owner.save(update_fields=['require_answers_for_likes'])
         required_question = Question.objects.create(
@@ -191,19 +190,20 @@ class ProfilePromptApiTests(TestCase):
             {'voter_id': str(self.viewer.id), 'selected_option_index': 0},
             format='json',
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(PromptPollVote.objects.filter(prompt=poll_prompt, voter=self.viewer).exists())
 
-        UserAnswer.objects.create(
-            user=self.viewer,
-            question=required_question,
-            me_answer=3,
-            looking_for_answer=3,
-            me_importance=3,
-            looking_for_importance=3,
-        )
+    def test_poll_owner_can_vote_on_own_poll(self):
+        self.client.post('/api/profile-prompts/replace-set/', self._valid_payload(), format='json')
+        poll_prompt = UserProfilePrompt.objects.get(user=self.owner, prompt_type='poll')
+
         response = self.client.post(
             f'/api/profile-prompts/{poll_prompt.id}/vote/',
-            {'voter_id': str(self.viewer.id), 'selected_option_index': 0},
+            {'voter_id': str(self.owner.id), 'selected_option_index': 2, 'comment': 'My own pick.'},
             format='json',
         )
+
         self.assertEqual(response.status_code, 200)
+        self.assertTrue(PromptPollVote.objects.filter(prompt=poll_prompt, voter=self.owner).exists())
+        self.assertFalse(UserResult.objects.filter(user=self.owner, result_user=self.owner, tag='like').exists())
+        self.assertFalse(Message.objects.filter(sender=self.owner, receiver=self.owner).exists())

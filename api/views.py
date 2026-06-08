@@ -2,7 +2,7 @@ from rest_framework import viewsets, permissions, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.db import transaction
-from django.db.models import Q, Count, F, Exists, OuterRef
+from django.db.models import Q, Count, Exists, OuterRef
 from django.utils import timezone
 from datetime import timedelta
 import logging
@@ -12,7 +12,7 @@ from collections import defaultdict
 logger = logging.getLogger(__name__)
 
 from .models import (
-    User, Tag, Question, UserAnswer, UserRequiredQuestion, Compatibility,
+    User, UserRestrictionHistory, Tag, Question, UserAnswer, UserRequiredQuestion, Compatibility,
     UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, Controls,
     Notification, Conversation, UserPicture,
     Post, PostImage, PostHashtag, PostRevision, PostReaction, PostComment, FeedActivity,
@@ -35,6 +35,222 @@ from .serializers import (
     PromptTemplateSerializer, UserProfilePromptSerializer, PromptPollVoteSerializer,
 )
 from .permissions import IsDashboardAdmin
+from .utils.admin_utils import profile_answer_key
+
+
+def _normalize_excluded_answer_values(value):
+    if value in (None, ''):
+        return []
+    if not isinstance(value, list):
+        raise ValueError('excluded_answer_values must be a list')
+
+    normalized = []
+    for raw_value in value:
+        try:
+            answer_value = int(raw_value)
+        except (TypeError, ValueError):
+            raise ValueError('excluded_answer_values must contain integers from 1 to 5')
+        if answer_value < 1 or answer_value > 5:
+            raise ValueError('excluded_answer_values must contain integers from 1 to 5')
+        if answer_value not in normalized:
+            normalized.append(answer_value)
+    return normalized
+
+
+def _apply_answer_exclusions(compatibilities, current_user):
+    excluded_by_question = {}
+    current_answers = UserAnswer.objects.filter(user=current_user).only(
+        'question_id',
+        'excluded_answer_values',
+    )
+
+    for answer in current_answers:
+        excluded_values = _normalize_excluded_answer_values(answer.excluded_answer_values)
+        if excluded_values:
+            excluded_by_question[answer.question_id] = excluded_values
+
+    if not excluded_by_question:
+        return compatibilities
+
+    candidate_answer_filter = Q()
+    for question_id, excluded_values in excluded_by_question.items():
+        candidate_answer_filter |= Q(question_id=question_id, me_answer__in=excluded_values)
+
+    excluded_user_ids = UserAnswer.objects.filter(candidate_answer_filter).exclude(
+        user=current_user
+    ).values_list('user_id', flat=True).distinct()
+
+    return compatibilities.exclude(
+        Q(user1=current_user, user2__id__in=excluded_user_ids) |
+        Q(user2=current_user, user1__id__in=excluded_user_ids)
+    )
+
+
+def _restriction_expires_at(restriction_type, restriction_date, restriction_duration):
+    if restriction_type != 'temporary' or not restriction_date or restriction_duration is None:
+        return None
+    try:
+        duration_days = int(restriction_duration)
+    except (TypeError, ValueError):
+        return None
+    return restriction_date + timedelta(days=duration_days)
+
+
+def _create_restriction_history(user, restricted_at=None):
+    restriction_type = user.restriction_type or (
+        'permanent' if user.restriction_duration == 0 else 'temporary'
+    )
+    restricted_at = restricted_at or user.restriction_date or user.ban_date or timezone.now()
+    expires_at = _restriction_expires_at(
+        restriction_type,
+        restricted_at,
+        user.restriction_duration,
+    )
+    return UserRestrictionHistory.objects.create(
+        user=user,
+        restriction_type=restriction_type,
+        duration_days=user.restriction_duration,
+        reason=user.restriction_reason or user.ban_reason or 'admin_restriction',
+        reason_detail=user.restriction_reason_detail or '',
+        restricted_at=restricted_at,
+        expires_at=expires_at,
+    )
+
+
+def _close_active_restriction_history(user, end_reason, ended_at=None, moderator_notes=''):
+    history = UserRestrictionHistory.objects.filter(
+        user=user,
+        ended_at__isnull=True,
+    ).order_by('-restricted_at').first()
+
+    if not history and user.restriction_type and user.restriction_date:
+        history = _create_restriction_history(user)
+
+    if not history:
+        return None
+
+    history.ended_at = ended_at or timezone.now()
+    history.end_reason = end_reason
+    if moderator_notes:
+        history.moderator_notes = moderator_notes
+    history.save(update_fields=['ended_at', 'end_reason', 'moderator_notes'])
+    return history
+
+
+def _close_orphan_active_restriction_history(user):
+    history = UserRestrictionHistory.objects.filter(
+        user=user,
+        ended_at__isnull=True,
+    ).order_by('-restricted_at').first()
+
+    if not history or user.is_banned:
+        return None
+
+    now = timezone.now()
+    if history.restriction_type == 'temporary' and history.expires_at and history.expires_at <= now:
+        history.ended_at = history.expires_at
+        history.end_reason = 'expired'
+    else:
+        history.ended_at = now
+        history.end_reason = 'removed'
+    history.save(update_fields=['ended_at', 'end_reason'])
+    return history
+
+
+def _clear_user_restriction(user):
+    user.is_banned = False
+    user.restriction_type = None
+    user.restriction_duration = None
+    user.restriction_reason = ''
+    user.restriction_reason_detail = ''
+    user.restriction_date = None
+    user.save(update_fields=[
+        'is_banned', 'restriction_type', 'restriction_duration',
+        'restriction_reason', 'restriction_reason_detail', 'restriction_date',
+    ])
+
+
+def _expire_temporary_restriction(user):
+    if not user.is_banned:
+        _close_orphan_active_restriction_history(user)
+        return False
+
+    if not UserRestrictionHistory.objects.filter(user=user, ended_at__isnull=True).exists():
+        _create_restriction_history(user)
+
+    expires_at = _restriction_expires_at(
+        user.restriction_type,
+        user.restriction_date,
+        user.restriction_duration,
+    )
+    if not expires_at or timezone.now() < expires_at:
+        return False
+
+    _close_active_restriction_history(user, 'expired', ended_at=expires_at)
+    _clear_user_restriction(user)
+    return True
+
+
+def _expire_temporary_restrictions(queryset=None):
+    if queryset is None:
+        queryset = User.objects.all()
+
+    candidate_ids = set(queryset.filter(is_banned=True).values_list('id', flat=True))
+    candidate_ids.update(
+        UserRestrictionHistory.objects.filter(
+            user_id__in=queryset.values('id'),
+            ended_at__isnull=True,
+        ).values_list('user_id', flat=True)
+    )
+
+    candidate_users = User.objects.filter(
+        id__in=candidate_ids,
+    ).only(
+        'id', 'username', 'is_banned', 'restriction_type', 'restriction_duration',
+        'restriction_reason', 'restriction_reason_detail', 'restriction_date',
+        'ban_date', 'ban_reason',
+    )
+    for user in candidate_users:
+        _expire_temporary_restriction(user)
+
+
+def _apply_user_restriction(user, restriction_type, duration, reason, reason_detail=''):
+    _expire_temporary_restriction(user)
+    now = timezone.now()
+
+    if user.is_banned or UserRestrictionHistory.objects.filter(user=user, ended_at__isnull=True).exists():
+        _close_active_restriction_history(user, 'replaced', ended_at=now)
+
+    if restriction_type == 'permanent':
+        duration_days = 0
+    else:
+        restriction_type = 'temporary'
+        try:
+            duration_days = max(1, int(duration))
+        except (TypeError, ValueError):
+            duration_days = 30
+
+    user.is_banned = True
+    user.restriction_type = restriction_type
+    user.restriction_duration = duration_days
+    user.restriction_reason = reason or 'admin_restriction'
+    user.restriction_reason_detail = reason_detail or ''
+    user.restriction_date = now
+    user.save(update_fields=[
+        'is_banned', 'restriction_type', 'restriction_duration',
+        'restriction_reason', 'restriction_reason_detail', 'restriction_date',
+    ])
+    _create_restriction_history(user, restricted_at=now)
+
+
+def _remove_user_restriction(user, description=''):
+    if _expire_temporary_restriction(user):
+        return
+
+    if user.is_banned or UserRestrictionHistory.objects.filter(user=user, ended_at__isnull=True).exists():
+        _close_active_restriction_history(user, 'removed', moderator_notes=description or '')
+
+    _clear_user_restriction(user)
 
 
 class UserViewSet(viewsets.ModelViewSet):
@@ -46,6 +262,8 @@ class UserViewSet(viewsets.ModelViewSet):
     ordering = ['-last_active']
 
     def get_queryset(self):
+        _expire_temporary_restrictions()
+
         # For retrieve (single user lookup), include banned users so the frontend
         # can detect the ban and show the appropriate overlay
         if self.action in ['retrieve', 'restrict', 'remove_restriction']:
@@ -70,21 +288,7 @@ class UserViewSet(viewsets.ModelViewSet):
     def retrieve(self, request, *args, **kwargs):
         """Auto-unban users whose temporary restriction has expired"""
         instance = self.get_object()
-        if (instance.is_banned
-                and instance.restriction_type == 'temporary'
-                and instance.restriction_date
-                and instance.restriction_duration):
-            expiry = instance.restriction_date + timedelta(days=instance.restriction_duration)
-            if timezone.now() >= expiry:
-                instance.is_banned = False
-                instance.restriction_type = None
-                instance.restriction_duration = None
-                instance.restriction_reason = ''
-                instance.restriction_date = None
-                instance.save(update_fields=[
-                    'is_banned', 'restriction_type', 'restriction_duration',
-                    'restriction_reason', 'restriction_date'
-                ])
+        _expire_temporary_restriction(instance)
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
 
@@ -292,26 +496,45 @@ class UserViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def admin_profiles(self, request):
         """Lightweight user list for admin dashboard"""
-        users = User.objects.all().annotate(
+        _expire_temporary_restrictions()
+        users = list(User.objects.all().annotate(
             has_pending_reports=Exists(
                 UserReport.objects.filter(
                     reported_user_id=OuterRef('id'),
                     status='pending'
                 )
-            )
+            ),
+            answered_question_count=Count('answers', distinct=True),
         ).values(
             'id', 'username', 'first_name', 'last_name', 'email',
             'age', 'live', 'date_joined', 'is_banned', 'is_admin',
-            'questions_answered_count', 'restriction_type', 'profile_photo',
-            'has_pending_reports'
-        )
+            'questions_answered_count', 'restriction_type', 'restriction_duration',
+            'restriction_reason', 'restriction_reason_detail', 'restriction_date', 'profile_photo',
+            'has_pending_reports', 'answered_question_count',
+        ))
 
-        return Response(list(users))
+        answer_map = defaultdict(dict)
+        user_ids = [user['id'] for user in users]
+        profile_answers = UserAnswer.objects.filter(
+            user_id__in=user_ids,
+            question__question_number__in=[1, 2],
+        ).select_related('question').only('user_id', 'me_answer', 'question__question_name', 'question__text')
+        for answer in profile_answers:
+            key = profile_answer_key(answer.question)
+            if key:
+                answer_map[answer.user_id][key] = answer.me_answer
+
+        for user in users:
+            user['questions_answered_count'] = user.pop('answered_question_count')
+            user['question_answers'] = answer_map.get(user['id'], {})
+
+        return Response(users)
 
     @action(detail=False, methods=['get'])
     def restricted(self, request):
         """Get restricted users (admin only) - all banned/restricted users"""
-        restricted_users = User.objects.filter(is_banned=True)
+        _expire_temporary_restrictions()
+        restricted_users = User.objects.filter(is_banned=True).order_by('-restriction_date', 'username')
         serializer = self.get_serializer(restricted_users, many=True)
         return Response(serializer.data)
 
@@ -340,14 +563,9 @@ class UserViewSet(viewsets.ModelViewSet):
         restriction_type = request.data.get('restriction_type', 'temporary')
         duration = request.data.get('duration', 30)
         reason = request.data.get('reason', 'admin_restriction')
+        reason_detail = request.data.get('reason_detail', '')
 
-        user.is_banned = True
-        user.restriction_type = restriction_type
-        user.restriction_duration = duration
-        user.restriction_reason = reason
-        user.restriction_reason_detail = request.data.get('reason_detail', '')
-        user.restriction_date = timezone.now()
-        user.save()
+        _apply_user_restriction(user, restriction_type, duration, reason, reason_detail)
 
         return Response({'status': 'user restricted'})
 
@@ -361,13 +579,7 @@ class UserViewSet(viewsets.ModelViewSet):
         user = self.get_object()
         description = request.data.get('description', '')
 
-        user.is_banned = False
-        user.restriction_type = None
-        user.restriction_duration = None
-        user.restriction_reason = ''
-        user.restriction_reason_detail = ''
-        user.restriction_date = None
-        user.save()
+        _remove_user_restriction(user, description)
 
         # Also dismiss any pending reports for this user, storing the description as moderator notes
         update_fields = {'status': 'dismissed', 'resolved_at': timezone.now()}
@@ -806,6 +1018,8 @@ class UserViewSet(viewsets.ModelViewSet):
                         Q(user2=request.user, user1__bio__icontains=search_term)
                     )
                     print(f"🔍 Applied bio search filter: '{search_term}'")
+
+            compatibilities = _apply_answer_exclusions(compatibilities, request.user)
 
             if apply_required_filter:
                 print(f"🔍 [required] ENTERING required_filter path: required_scope={required_scope!r}")
@@ -1623,16 +1837,6 @@ class UserProfilePromptViewSet(viewsets.ReadOnlyModelViewSet):
         except User.DoesNotExist:
             return Response({'error': 'Voter not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        if str(voter.id) == str(prompt.user_id):
-            return Response({'error': 'You cannot vote on your own poll.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        gate_message = self._required_like_gate_error(voter, prompt.user)
-        if gate_message:
-            return Response(
-                {'error': 'required_questions_unanswered', 'message': gate_message},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
         try:
             selected_index = int(request.data.get('selected_option_index'))
         except (TypeError, ValueError):
@@ -1664,52 +1868,57 @@ class UserProfilePromptViewSet(viewsets.ReadOnlyModelViewSet):
                 },
             )
 
-            user_result, like_created = UserResult.objects.get_or_create(
-                user=voter,
-                result_user=prompt.user,
-                tag='like',
-            )
+            is_self_vote = str(voter.id) == str(prompt.user_id)
 
-            if like_created:
-                Notification.objects.create(
-                    recipient=prompt.user,
-                    sender=voter,
-                    notification_type='like',
-                    related_user_result=user_result,
+            if not is_self_vote:
+                user_result, like_created = UserResult.objects.get_or_create(
+                    user=voter,
+                    result_user=prompt.user,
+                    tag='like',
                 )
 
-                mutual_like = UserResult.objects.filter(
-                    user=prompt.user,
-                    result_user=voter,
-                    tag='like',
-                ).exists()
-                if mutual_like:
-                    Notification.objects.create(
-                        recipient=voter,
-                        sender=prompt.user,
-                        notification_type='match',
-                        related_user_result=user_result,
-                    )
+                if like_created:
                     Notification.objects.create(
                         recipient=prompt.user,
                         sender=voter,
-                        notification_type='match',
+                        notification_type='like',
                         related_user_result=user_result,
                     )
+
+                    mutual_like = UserResult.objects.filter(
+                        user=prompt.user,
+                        result_user=voter,
+                        tag='like',
+                    ).exists()
+                    if mutual_like:
+                        Notification.objects.create(
+                            recipient=voter,
+                            sender=prompt.user,
+                            notification_type='match',
+                            related_user_result=user_result,
+                        )
+                        Notification.objects.create(
+                            recipient=prompt.user,
+                            sender=voter,
+                            notification_type='match',
+                            related_user_result=user_result,
+                        )
 
             option_text = options[selected_index] if selected_index < len(options) else ''
             note = f'Voted for "{option_text}"'
             if comment:
                 note = f'{note}: {comment}'
-            Notification.objects.create(
-                recipient=prompt.user,
-                sender=voter,
-                notification_type='prompt_poll',
-                note=note,
-                related_prompt_poll_vote=vote,
-            )
 
-            if comment:
+            if not is_self_vote:
+                Notification.objects.create(
+                    recipient=prompt.user,
+                    sender=voter,
+                    notification_type='prompt_poll',
+                    note=note,
+                    related_prompt_poll_vote=vote,
+                )
+
+            if comment and not is_self_vote:
                 if str(voter.id) < str(prompt.user_id):
                     p1_id, p2_id = voter.id, prompt.user_id
                 else:
@@ -2412,6 +2621,14 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
             else:
                 UserRequiredQuestion.objects.filter(user=user, question=question).delete()
 
+    @staticmethod
+    def _sync_answered_count(user):
+        actual_count = UserAnswer.objects.filter(user=user).count()
+        if actual_count != user.questions_answered_count:
+            User.objects.filter(id=user.id).update(questions_answered_count=actual_count)
+            user.questions_answered_count = actual_count
+        return actual_count
+
     def get_queryset(self):
         queryset = UserAnswer.objects.select_related(
             'question', 'user', 'question__submitted_by'
@@ -2488,6 +2705,12 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
             looking_for_importance = request.data.get('looking_for_importance', 1)
             looking_for_share = request.data.get('looking_for_share', True)
             is_required_for_me = request.data.get('is_required_for_me', False)
+            try:
+                excluded_answer_values = _normalize_excluded_answer_values(
+                    request.data.get('excluded_answer_values', [])
+                )
+            except ValueError as e:
+                return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
             # Sync UserRequiredQuestion (required for me is stored there; user can require without answering)
             self._sync_required_question(
@@ -2498,19 +2721,23 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
             )
 
             # Create or update UserAnswer (no longer store is_required_for_me on UserAnswer)
+            defaults = {
+                'me_answer': me_answer,
+                'me_open_to_all': me_open_to_all,
+                'me_importance': me_importance,
+                'me_share': me_share,
+                'looking_for_answer': looking_for_answer,
+                'looking_for_open_to_all': looking_for_open_to_all,
+                'looking_for_importance': looking_for_importance,
+                'looking_for_share': looking_for_share,
+            }
+            if 'excluded_answer_values' in request.data:
+                defaults['excluded_answer_values'] = excluded_answer_values
+
             user_answer, created = UserAnswer.objects.update_or_create(
                 user=user,
                 question=question,
-                defaults={
-                    'me_answer': me_answer,
-                    'me_open_to_all': me_open_to_all,
-                    'me_importance': me_importance,
-                    'me_share': me_share,
-                    'looking_for_answer': looking_for_answer,
-                    'looking_for_open_to_all': looking_for_open_to_all,
-                    'looking_for_importance': looking_for_importance,
-                    'looking_for_share': looking_for_share,
-                }
+                defaults=defaults
             )
 
             # Auto-feed: emit a question_answered activity. Debounce within 60s
@@ -2536,19 +2763,8 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
             except Exception as e:
                 logger.warning(f'Could not record question_answered activity: {e}')
 
-            # Maintain answered count and determine whether to enqueue a compatibility job
-            if created:
-                User.objects.filter(id=user.id).update(
-                    questions_answered_count=F('questions_answered_count') + 1
-                )
-                user.refresh_from_db(fields=['questions_answered_count'])
-            elif user.questions_answered_count == 0:
-                actual_count = UserAnswer.objects.filter(user=user).count()
-                if actual_count != user.questions_answered_count:
-                    User.objects.filter(id=user.id).update(
-                        questions_answered_count=actual_count
-                    )
-                    user.questions_answered_count = actual_count
+            # Maintain total answer-row count.
+            self._sync_answered_count(user)
 
             match_ready = (user.questions_answered_count or 0) >= MIN_MATCHABLE_ANSWERS
             has_existing_compat = Compatibility.objects.filter(
@@ -2604,9 +2820,18 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
                 if field in data:
                     setattr(instance, field, data.get(field))
 
+            if 'excluded_answer_values' in data:
+                try:
+                    instance.excluded_answer_values = _normalize_excluded_answer_values(
+                        data.get('excluded_answer_values')
+                    )
+                except ValueError as e:
+                    return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
             instance.save()
 
             user = instance.user
+            self._sync_answered_count(user)
             if (user.questions_answered_count or 0) >= MIN_MATCHABLE_ANSWERS:
                 enqueue_user_for_recalculation(user, force=True)
                 process_user_compatibility_async(str(user.id))
@@ -2620,6 +2845,14 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save()
+
+    def perform_destroy(self, instance):
+        user = instance.user
+        instance.delete()
+        self._sync_answered_count(user)
+        if (user.questions_answered_count or 0) >= MIN_MATCHABLE_ANSWERS:
+            enqueue_user_for_recalculation(user, force=True)
+            process_user_compatibility_async(str(user.id))
 
     @action(detail=False, methods=['get'])
     def by_question(self, request):
@@ -2661,10 +2894,7 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
         # Clean up UserRequiredQuestion for these questions
         UserRequiredQuestion.objects.filter(user=user, question__question_number=question_number).delete()
 
-        # Recount distinct answered question numbers
-        actual_count = UserAnswer.objects.filter(user=user).values('question__question_number').distinct().count()
-        User.objects.filter(id=user.id).update(questions_answered_count=actual_count)
-        user.refresh_from_db()
+        self._sync_answered_count(user)
 
         # Queue compatibility recalculation; the job processor handles the expensive work.
         if (user.questions_answered_count or 0) >= MIN_MATCHABLE_ANSWERS:
@@ -3303,13 +3533,13 @@ class UserReportViewSet(viewsets.ModelViewSet):
             # Apply temporary restriction to reported user
             duration = request.data.get('duration', 30)
             reported_user = report.reported_user
-            reported_user.is_banned = True
-            reported_user.restriction_reason = report.reason_category
-            reported_user.restriction_reason_detail = report.reason or ''
-            reported_user.restriction_date = timezone.now()
-            reported_user.restriction_type = 'temporary'
-            reported_user.restriction_duration = int(duration)
-            reported_user.save()
+            _apply_user_restriction(
+                reported_user,
+                'temporary',
+                duration,
+                report.reason_category,
+                report.reason or '',
+            )
 
             # Resolve all pending reports for this user
             UserReport.objects.filter(
@@ -3322,13 +3552,13 @@ class UserReportViewSet(viewsets.ModelViewSet):
         elif action == 'permanent':
             # Apply permanent restriction to reported user
             reported_user = report.reported_user
-            reported_user.is_banned = True
-            reported_user.restriction_reason = report.reason_category
-            reported_user.restriction_reason_detail = report.reason or ''
-            reported_user.restriction_date = timezone.now()
-            reported_user.restriction_type = 'permanent'
-            reported_user.restriction_duration = 0
-            reported_user.save()
+            _apply_user_restriction(
+                reported_user,
+                'permanent',
+                0,
+                report.reason_category,
+                report.reason or '',
+            )
 
             # Resolve all pending reports for this user
             UserReport.objects.filter(
@@ -4054,6 +4284,13 @@ class PostViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Post must have a body or at least one image.'}, status=400)
         if len(body) > 2000:
             return Response({'error': 'Body too long (max 2000 chars).'}, status=400)
+        from api.utils.word_filter import validate_text_fields
+        has_restricted, found_words = validate_text_fields(feed_post=body)
+        if has_restricted:
+            return Response(
+                {'error': f'Your post contains restricted words: {", ".join(found_words)}'},
+                status=400,
+            )
         if not isinstance(image_urls, list) or len(image_urls) > PostImage.MAX_PER_POST:
             return Response({'error': f'Up to {PostImage.MAX_PER_POST} images per post.'}, status=400)
 
@@ -4082,6 +4319,13 @@ class PostViewSet(viewsets.ModelViewSet):
             new_body = new_body.strip()
             if len(new_body) > 2000:
                 return Response({'error': 'Body too long (max 2000 chars).'}, status=400)
+            from api.utils.word_filter import validate_text_fields
+            has_restricted, found_words = validate_text_fields(feed_post=new_body)
+            if has_restricted:
+                return Response(
+                    {'error': f'Your post contains restricted words: {", ".join(found_words)}'},
+                    status=400,
+                )
             if new_body != post.body:
                 PostRevision.objects.create(post=post, body=post.body)
                 post.body = new_body
@@ -4181,6 +4425,13 @@ class PostCommentViewSet(viewsets.ModelViewSet):
             return Response({'error': 'post and body are required.'}, status=400)
         if len(body) > 1000:
             return Response({'error': 'Comment too long (max 1000 chars).'}, status=400)
+        from api.utils.word_filter import validate_text_fields
+        has_restricted, found_words = validate_text_fields(feed_comment=body)
+        if has_restricted:
+            return Response(
+                {'error': f'Your comment contains restricted words: {", ".join(found_words)}'},
+                status=400,
+            )
         try:
             post = Post.objects.get(id=post_id, is_deleted=False)
         except Post.DoesNotExist:
@@ -4200,6 +4451,13 @@ class PostCommentViewSet(viewsets.ModelViewSet):
         body = body.strip()
         if not body or len(body) > 1000:
             return Response({'error': 'Body required, max 1000 chars.'}, status=400)
+        from api.utils.word_filter import validate_text_fields
+        has_restricted, found_words = validate_text_fields(feed_comment=body)
+        if has_restricted:
+            return Response(
+                {'error': f'Your comment contains restricted words: {", ".join(found_words)}'},
+                status=400,
+            )
         comment.body = body
         comment.save(update_fields=['body', 'updated_at'])
         return Response(PostCommentSerializer(comment).data)

@@ -5,6 +5,14 @@ from typing import Iterable, Set
 from django.conf import settings
 
 DEFAULT_ADMIN_EMAIL = "admin@matchmatical.com"
+PROFILE_ANSWER_NAMES = {
+    "male": "male",
+    "female": "female",
+    "friend": "friend",
+    "hookup": "hookup",
+    "date": "date",
+    "partner": "partner",
+}
 
 
 def _configured_admin_emails() -> Set[str]:
@@ -47,3 +55,22 @@ def ensure_dashboard_admin(user) -> bool:
         return True
 
     return False
+
+
+def profile_answer_key(question) -> str | None:
+    """
+    Map grouped onboarding sub-questions to profile-list answer columns.
+
+    Gender and relationship are grouped by question_number, so question_number
+    alone cannot identify Male/Female/Friend/etc.
+    """
+    name = (getattr(question, "question_name", "") or "").strip().lower()
+    if name in PROFILE_ANSWER_NAMES:
+        return PROFILE_ANSWER_NAMES[name]
+
+    text = (getattr(question, "text", "") or "").strip().lower()
+    for token, key in PROFILE_ANSWER_NAMES.items():
+        if token in text:
+            return key
+
+    return None

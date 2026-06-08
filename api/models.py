@@ -43,9 +43,9 @@ class User(AbstractUser):
         default=False,
         help_text="If true, other users can only like this user after answering all of this user's required questions",
     )
-    share_answers = models.BooleanField(
-        default=False,
-        help_text="If true, users who can view this user's shared answers can also see their looking-for answers.",
+    share_answers = models.CharField(
+        max_length=16, choices=FEED_VISIBILITY_CHOICES, default='none',
+        help_text="Who can see this user's looking-for answers on answers they share.",
     )
     feed_visibility_bio = models.CharField(
         max_length=16, choices=FEED_VISIBILITY_CHOICES, default='all',
@@ -69,6 +69,40 @@ class User(AbstractUser):
 
     class Meta:
         db_table = 'users'
+
+
+class UserRestrictionHistory(models.Model):
+    """Audit history for user restrictions and bans."""
+
+    END_REASON_CHOICES = [
+        ('active', 'Active'),
+        ('expired', 'Expired'),
+        ('removed', 'Removed'),
+        ('replaced', 'Replaced'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='restriction_history')
+    restriction_type = models.CharField(max_length=20, help_text="temporary or permanent")
+    duration_days = models.PositiveIntegerField(null=True, blank=True)
+    reason = models.TextField(blank=True)
+    reason_detail = models.TextField(blank=True, default='')
+    restricted_at = models.DateTimeField()
+    expires_at = models.DateTimeField(null=True, blank=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    end_reason = models.CharField(max_length=20, choices=END_REASON_CHOICES, default='active')
+    moderator_notes = models.TextField(blank=True, default='')
+
+    class Meta:
+        db_table = 'user_restriction_history'
+        ordering = ['-restricted_at']
+        indexes = [
+            models.Index(fields=['user', '-restricted_at'], name='restriction_hist_user_date'),
+            models.Index(fields=['user', 'ended_at'], name='restriction_hist_active'),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username} {self.restriction_type} @ {self.restricted_at:%Y-%m-%d}"
 
 
 class InviteCode(models.Model):
@@ -220,12 +254,20 @@ class UserAnswer(models.Model):
     looking_for_open_to_all = models.BooleanField(default=False)
     looking_for_importance = models.PositiveIntegerField(default=1, help_text="Importance level for this answer")
     looking_for_share = models.BooleanField(default=True, help_text="Whether to share this preference")
+    excluded_answer_values = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Current user's one-way result exclusions for this question; answer values 1-5 only."
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
         unique_together = ['user', 'question']
+        indexes = [
+            models.Index(fields=['question', 'me_answer', 'user'], name='ua_question_me_user_idx'),
+        ]
     
     def __str__(self):
         return f"{self.user.username} - {self.question.text[:30]}"

@@ -2,7 +2,8 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from api.models import FeedActivity, Post, PostComment, UserResult
+from api.models import FeedActivity, Post, PostComment, RestrictedWord, UserResult
+from api.utils.word_filter import clear_restricted_words_cache
 
 
 class ProfileSocialApiTests(TestCase):
@@ -12,6 +13,11 @@ class ProfileSocialApiTests(TestCase):
         self.profile_user = User.objects.create_user(username='profile_social', email='profile_social@test.com', password='pass123')
         self.other = User.objects.create_user(username='other_social', email='other_social@test.com', password='pass123')
         self.client = APIClient()
+        RestrictedWord.objects.create(word='forbiddenword', severity='high', is_active=True)
+        clear_restricted_words_cache()
+
+    def tearDown(self):
+        clear_restricted_words_cache()
 
     def _profile_feed(self):
         return self.client.get(f'/api/feed/?author_id={self.profile_user.id}&user_id={self.viewer.id}')
@@ -80,3 +86,58 @@ class ProfileSocialApiTests(TestCase):
         self.assertEqual(response.data[0]['post_preview']['id'], str(visible_parent.id))
         self.assertEqual(response.data[0]['post_preview']['body'], visible_parent.body)
         self.assertEqual(response.data[0]['post_preview']['author']['id'], str(self.other.id))
+
+    def test_feed_post_create_and_update_reject_restricted_words(self):
+        create_response = self.client.post(
+            '/api/posts/',
+            {
+                'user_id': str(self.viewer.id),
+                'body': 'This has forbiddenword in it.',
+                'image_urls': [],
+                'visibility': 'all',
+            },
+            format='json',
+        )
+
+        self.assertEqual(create_response.status_code, 400)
+        self.assertIn('restricted words', create_response.data['error'])
+        self.assertFalse(Post.objects.filter(author=self.viewer, body__icontains='forbiddenword').exists())
+
+        post = Post.objects.create(author=self.viewer, body='Clean post', visibility='all')
+        update_response = self.client.patch(
+            f'/api/posts/{post.id}/',
+            {'user_id': str(self.viewer.id), 'body': 'Edited with forbiddenword.'},
+            format='json',
+        )
+
+        self.assertEqual(update_response.status_code, 400)
+        post.refresh_from_db()
+        self.assertEqual(post.body, 'Clean post')
+
+    def test_feed_comment_create_and_update_reject_restricted_words(self):
+        post = Post.objects.create(author=self.profile_user, body='Clean parent post', visibility='all')
+
+        create_response = self.client.post(
+            '/api/comments/',
+            {
+                'user_id': str(self.viewer.id),
+                'post': str(post.id),
+                'body': 'Comment with forbiddenword.',
+            },
+            format='json',
+        )
+
+        self.assertEqual(create_response.status_code, 400)
+        self.assertIn('restricted words', create_response.data['error'])
+        self.assertFalse(PostComment.objects.filter(author=self.viewer, body__icontains='forbiddenword').exists())
+
+        comment = PostComment.objects.create(post=post, author=self.viewer, body='Clean comment')
+        update_response = self.client.patch(
+            f'/api/comments/{comment.id}/',
+            {'user_id': str(self.viewer.id), 'body': 'Edited with forbiddenword.'},
+            format='json',
+        )
+
+        self.assertEqual(update_response.status_code, 400)
+        comment.refresh_from_db()
+        self.assertEqual(comment.body, 'Clean comment')
