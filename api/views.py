@@ -38,12 +38,77 @@ from .permissions import IsDashboardAdmin
 from .utils.admin_utils import profile_answer_key
 
 
-def _normalize_excluded_answer_values(value):
+DEFAULT_EXCLUDED_ANSWER_VALUES = {1, 2, 3, 4, 5}
+
+
+def _coerce_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+    return bool(value)
+
+
+def _allowed_answer_values_for_question(question):
+    if not question:
+        return DEFAULT_EXCLUDED_ANSWER_VALUES
+
+    answer_values = set()
+    for raw_value in question.answers.values_list('value', flat=True):
+        try:
+            answer_value = int(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= answer_value <= 5:
+            answer_values.add(answer_value)
+
+    return answer_values or DEFAULT_EXCLUDED_ANSWER_VALUES
+
+
+def _normalize_question_answer_value(value, question, open_to_all=False):
+    if _coerce_bool(open_to_all):
+        return 6
+
+    try:
+        answer_value = int(value)
+    except (TypeError, ValueError):
+        raise ValueError('answer values must be integers from 1 to 5')
+
+    allowed_values = _allowed_answer_values_for_question(question)
+    if answer_value not in allowed_values:
+        allowed_display = ', '.join(str(item) for item in sorted(allowed_values))
+        raise ValueError(f'answer values for this question can only be: {allowed_display}')
+
+    return answer_value
+
+
+def _allowed_excluded_answer_values_for_question(question):
+    if not question:
+        return DEFAULT_EXCLUDED_ANSWER_VALUES
+
+    question_number = question.question_number
+    question_name = (question.question_name or '').strip().lower()
+
+    # These mandatory groups are endpoint-style for exclusion purposes.
+    if question_number in {2, 3, 5, 7}:
+        return {1, 5}
+
+    if question_number == 4:
+        return {1, 3, 5}
+
+    if question_number == 10 and (question.group_number == 1 or question_name == 'have'):
+        return {1, 5}
+
+    return _allowed_answer_values_for_question(question)
+
+
+def _normalize_excluded_answer_values(value, question=None, drop_unsupported=False):
     if value in (None, ''):
         return []
     if not isinstance(value, list):
         raise ValueError('excluded_answer_values must be a list')
 
+    allowed_values = _allowed_excluded_answer_values_for_question(question)
     normalized = []
     for raw_value in value:
         try:
@@ -52,6 +117,13 @@ def _normalize_excluded_answer_values(value):
             raise ValueError('excluded_answer_values must contain integers from 1 to 5')
         if answer_value < 1 or answer_value > 5:
             raise ValueError('excluded_answer_values must contain integers from 1 to 5')
+        if answer_value not in allowed_values:
+            if drop_unsupported:
+                continue
+            allowed_display = ', '.join(str(item) for item in sorted(allowed_values)) or 'none'
+            raise ValueError(
+                f'excluded_answer_values for this question can only contain: {allowed_display}'
+            )
         if answer_value not in normalized:
             normalized.append(answer_value)
     return normalized
@@ -59,13 +131,20 @@ def _normalize_excluded_answer_values(value):
 
 def _apply_answer_exclusions(compatibilities, current_user):
     excluded_by_question = {}
-    current_answers = UserAnswer.objects.filter(user=current_user).only(
+    current_answers = UserAnswer.objects.filter(user=current_user).select_related('question').only(
         'question_id',
         'excluded_answer_values',
+        'question__question_number',
+        'question__question_name',
+        'question__group_number',
     )
 
     for answer in current_answers:
-        excluded_values = _normalize_excluded_answer_values(answer.excluded_answer_values)
+        excluded_values = _normalize_excluded_answer_values(
+            answer.excluded_answer_values,
+            question=answer.question,
+            drop_unsupported=True,
+        )
         if excluded_values:
             excluded_by_question[answer.question_id] = excluded_values
 
@@ -2697,17 +2776,27 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
             
             # Extract other fields
             me_answer = request.data.get('me_answer', 1)
-            me_open_to_all = request.data.get('me_open_to_all', False)
+            me_open_to_all = _coerce_bool(request.data.get('me_open_to_all', False))
             me_importance = request.data.get('me_importance', 1)
-            me_share = request.data.get('me_share', True)
+            me_share = _coerce_bool(request.data.get('me_share', True))
             looking_for_answer = request.data.get('looking_for_answer', 1)
-            looking_for_open_to_all = request.data.get('looking_for_open_to_all', False)
+            looking_for_open_to_all = _coerce_bool(request.data.get('looking_for_open_to_all', False))
             looking_for_importance = request.data.get('looking_for_importance', 1)
-            looking_for_share = request.data.get('looking_for_share', True)
-            is_required_for_me = request.data.get('is_required_for_me', False)
+            looking_for_share = _coerce_bool(request.data.get('looking_for_share', True))
+            is_required_for_me = _coerce_bool(request.data.get('is_required_for_me', False))
+            try:
+                me_answer = _normalize_question_answer_value(me_answer, question, me_open_to_all)
+                looking_for_answer = _normalize_question_answer_value(
+                    looking_for_answer,
+                    question,
+                    looking_for_open_to_all,
+                )
+            except ValueError as e:
+                return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
             try:
                 excluded_answer_values = _normalize_excluded_answer_values(
-                    request.data.get('excluded_answer_values', [])
+                    request.data.get('excluded_answer_values', []),
+                    question=question,
                 )
             except ValueError as e:
                 return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -2818,12 +2907,35 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
                 'looking_for_share',
             ]:
                 if field in data:
-                    setattr(instance, field, data.get(field))
+                    value = data.get(field)
+                    if field in {
+                        'me_open_to_all',
+                        'me_share',
+                        'looking_for_open_to_all',
+                        'looking_for_share',
+                    }:
+                        value = _coerce_bool(value)
+                    setattr(instance, field, value)
+
+            try:
+                instance.me_answer = _normalize_question_answer_value(
+                    instance.me_answer,
+                    instance.question,
+                    instance.me_open_to_all,
+                )
+                instance.looking_for_answer = _normalize_question_answer_value(
+                    instance.looking_for_answer,
+                    instance.question,
+                    instance.looking_for_open_to_all,
+                )
+            except ValueError as e:
+                return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
             if 'excluded_answer_values' in data:
                 try:
                     instance.excluded_answer_values = _normalize_excluded_answer_values(
-                        data.get('excluded_answer_values')
+                        data.get('excluded_answer_values'),
+                        question=instance.question,
                     )
                 except ValueError as e:
                     return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
