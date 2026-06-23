@@ -39,6 +39,7 @@ from .utils.admin_utils import profile_answer_key
 
 
 DEFAULT_EXCLUDED_ANSWER_VALUES = {1, 2, 3, 4, 5}
+DEFAULT_IMPORTANCE_EXCLUSION_VALUES = {1, 2, 3, 4, 5}
 
 
 def _coerce_bool(value):
@@ -129,6 +130,27 @@ def _normalize_excluded_answer_values(value, question=None, drop_unsupported=Fal
     return normalized
 
 
+def _normalize_importance_exclusion_values(value, drop_unsupported=False):
+    if value in (None, ''):
+        return []
+    if not isinstance(value, list):
+        raise ValueError('importance_exclusion_values must be a list')
+
+    normalized = []
+    for raw_value in value:
+        try:
+            importance_value = int(raw_value)
+        except (TypeError, ValueError):
+            raise ValueError('importance_exclusion_values must contain integers from 1 to 5')
+        if importance_value not in DEFAULT_IMPORTANCE_EXCLUSION_VALUES:
+            if drop_unsupported:
+                continue
+            raise ValueError('importance_exclusion_values must contain integers from 1 to 5')
+        if importance_value not in normalized:
+            normalized.append(importance_value)
+    return normalized
+
+
 def _apply_answer_exclusions(compatibilities, current_user):
     excluded_by_question = {}
     current_answers = UserAnswer.objects.filter(user=current_user).select_related('question').only(
@@ -156,6 +178,37 @@ def _apply_answer_exclusions(compatibilities, current_user):
         candidate_answer_filter |= Q(question_id=question_id, me_answer__in=excluded_values)
 
     excluded_user_ids = UserAnswer.objects.filter(candidate_answer_filter).exclude(
+        user=current_user
+    ).values_list('user_id', flat=True).distinct()
+
+    return compatibilities.exclude(
+        Q(user1=current_user, user2__id__in=excluded_user_ids) |
+        Q(user2=current_user, user1__id__in=excluded_user_ids)
+    )
+
+
+def _apply_importance_exclusions(compatibilities, current_user):
+    excluded_importance_values = _normalize_importance_exclusion_values(
+        getattr(current_user, 'importance_exclusion_values', []),
+        drop_unsupported=True,
+    )
+    if not excluded_importance_values:
+        return compatibilities
+
+    critical_question_ids = list(
+        UserAnswer.objects.filter(
+            user=current_user,
+            looking_for_importance=5,
+        ).values_list('question_id', flat=True)
+    )
+
+    if not critical_question_ids:
+        return compatibilities
+
+    excluded_user_ids = UserAnswer.objects.filter(
+        question_id__in=critical_question_ids,
+        looking_for_importance__in=excluded_importance_values,
+    ).exclude(
         user=current_user
     ).values_list('user_id', flat=True).distinct()
 
@@ -1099,6 +1152,7 @@ class UserViewSet(viewsets.ModelViewSet):
                     print(f"🔍 Applied bio search filter: '{search_term}'")
 
             compatibilities = _apply_answer_exclusions(compatibilities, request.user)
+            compatibilities = _apply_importance_exclusions(compatibilities, request.user)
 
             if apply_required_filter:
                 print(f"🔍 [required] ENTERING required_filter path: required_scope={required_scope!r}")

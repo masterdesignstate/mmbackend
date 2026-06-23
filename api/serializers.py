@@ -117,6 +117,24 @@ class UserSerializer(serializers.ModelSerializer):
     pictures = UserPictureSerializer(many=True, read_only=True)
     profile_prompts = UserProfilePromptSerializer(many=True, read_only=True)
 
+    def validate_importance_exclusion_values(self, value):
+        if value in (None, ''):
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError('Importance exclusion values must be a list.')
+
+        normalized = []
+        for raw_value in value:
+            try:
+                importance_value = int(raw_value)
+            except (TypeError, ValueError):
+                raise serializers.ValidationError('Importance exclusion values must be integers from 1 to 5.')
+            if importance_value < 1 or importance_value > 5:
+                raise serializers.ValidationError('Importance exclusion values must be integers from 1 to 5.')
+            if importance_value not in normalized:
+                normalized.append(importance_value)
+        return normalized
+
     class Meta:
         model = User
         fields = [
@@ -127,6 +145,7 @@ class UserSerializer(serializers.ModelSerializer):
             'restriction_type', 'restriction_duration', 'restriction_reason', 'restriction_reason_detail', 'restriction_date',
             'require_answers_for_likes', 'share_answers',
             'feed_visibility_bio', 'feed_visibility_photo', 'feed_visibility_question',
+            'importance_exclusion_values',
             'pictures', 'profile_prompts',
         ]
         read_only_fields = [

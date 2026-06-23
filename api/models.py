@@ -59,6 +59,11 @@ class User(AbstractUser):
         max_length=16, choices=FEED_VISIBILITY_CHOICES, default='all',
         help_text="Who can see this user's question-answered activities in the feed.",
     )
+    importance_exclusion_values = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Exclude results where this user's Them importance is 5 and the other user's Them importance is in these values.",
+    )
 
     @property
     def is_online(self):
