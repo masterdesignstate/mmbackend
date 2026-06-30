@@ -195,6 +195,18 @@ ADMIN_EMAILS = [
     if email.strip()
 ]
 
+# Email verification / Postmark
+EMAIL_VERIFICATION_REQUIRED = config('EMAIL_VERIFICATION_REQUIRED', default=True, cast=bool)
+EMAIL_VERIFICATION_TOKEN_MAX_AGE_SECONDS = config(
+    'EMAIL_VERIFICATION_TOKEN_MAX_AGE_SECONDS',
+    default=60 * 60 * 24 * 3,
+    cast=int,
+)
+FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:3000')
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='hello@matchmatical.com')
+POSTMARK_SERVER_TOKEN = config('POSTMARK_SERVER_TOKEN', default='')
+POSTMARK_MESSAGE_STREAM = config('POSTMARK_MESSAGE_STREAM', default='outbound')
+
 if USE_AZURE_STORAGE:
     # Azure Storage settings
     AZURE_ACCOUNT_NAME = config('AZURE_ACCOUNT_NAME')

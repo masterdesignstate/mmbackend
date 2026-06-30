@@ -9,7 +9,7 @@ from .views import (
 )
 from .function_views import (
     user_signup, user_personal_details, user_login, check_user_exists, check_onboarding_status, update_profile_photo, upload_photo, test_endpoint, delete_question,
-    impostor_login, impostor_exit
+    impostor_login, impostor_exit, verify_email, resend_verification_email
 )
 
 router = DefaultRouter()
@@ -41,6 +41,8 @@ urlpatterns = [
     path('auth/signup/', user_signup, name='user_signup'),
     path('auth/personal-details/', user_personal_details, name='user_personal_details'),
     path('auth/login/', user_login, name='user_login'),
+    path('auth/verify-email/', verify_email, name='verify_email'),
+    path('auth/resend-verification-email/', resend_verification_email, name='resend_verification_email'),
     path('auth/check-user/', check_user_exists, name='check_user_exists'),
     path('auth/onboarding-status/', check_onboarding_status, name='check_onboarding_status'),
     path('auth/update-profile-photo/', update_profile_photo, name='update_profile_photo'),

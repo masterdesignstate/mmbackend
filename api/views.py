@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from django.db import transaction
 from django.db.models import Q, Count, Exists, OuterRef
 from django.utils import timezone
+from django.conf import settings
 from datetime import timedelta
 import logging
 import time
@@ -19,6 +20,7 @@ from .models import (
     PromptTemplate, UserProfilePrompt, PromptPollVote,
 )
 from .services.compatibility_service import CompatibilityService
+from .services.email_verification import apply_email_verification_restriction, send_verification_email
 from .analytics import capture as posthog_capture
 from .services.compatibility_queue import (
     enqueue_user_for_recalculation,
@@ -1705,9 +1707,9 @@ class UserViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def change_email(self, request):
         """Change user's email address (requires current password and current email)"""
-        current_email = request.data.get('current_email')
+        current_email = (request.data.get('current_email') or '').strip().lower()
         current_password = request.data.get('current_password')
-        new_email = request.data.get('new_email')
+        new_email = (request.data.get('new_email') or '').strip().lower()
 
         if not current_email or not current_password or not new_email:
             return Response({
@@ -1731,13 +1733,25 @@ class UserViewSet(viewsets.ModelViewSet):
         # Update email and username (since we use email as username)
         user.email = new_email
         user.username = new_email
+        if settings.EMAIL_VERIFICATION_REQUIRED:
+            user.email_verified = False
+            user.email_verified_at = None
         user.save()
+
+        if settings.EMAIL_VERIFICATION_REQUIRED:
+            apply_email_verification_restriction(user)
+            try:
+                send_verification_email(user)
+            except Exception as email_error:
+                logger.error("Failed to send verification email after email change for %s: %s", user.email, email_error)
 
         logger.info(f"User {user.id} changed email from {current_email} to {new_email}")
         return Response({
             'success': True,
-            'message': 'Email updated successfully',
-            'email': new_email
+            'message': 'Email updated successfully. Please verify your new email.' if settings.EMAIL_VERIFICATION_REQUIRED else 'Email updated successfully',
+            'email': new_email,
+            'email_verification_required': settings.EMAIL_VERIFICATION_REQUIRED,
+            'email_verified': user.email_verified,
         })
 
     @action(detail=False, methods=['post'])

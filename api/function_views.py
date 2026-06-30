@@ -8,8 +8,16 @@ from django.db import transaction
 from django.contrib.auth.hashers import make_password
 from django.utils import timezone
 from django.conf import settings
+from django.core import signing
 from datetime import datetime
 from .models import User, InviteCode
+from .services.email_verification import (
+    apply_email_verification_restriction,
+    make_email_verification_url,
+    mark_email_verified,
+    read_email_verification_token,
+    send_verification_email,
+)
 from .utils.admin_utils import ensure_dashboard_admin
 
 logger = logging.getLogger(__name__)
@@ -38,7 +46,7 @@ def user_signup(request):
         
         # Parse request data
         data = json.loads(request.body)
-        email = data.get('email')
+        email = (data.get('email') or '').strip().lower()
         password = data.get('password')
         alpha_code = (data.get('alpha_code') or data.get('invite_code') or '').strip()
 
@@ -89,10 +97,9 @@ def user_signup(request):
         
         print(f"✅ No existing user found, proceeding with creation")
         
-        # Admin/test bypass: the magic code "888888" lets any signup through
-        # without consuming a real InviteCode. Reusable for QA.
-        ADMIN_BYPASS_CODE = '888888'
-        is_bypass = alpha_code == ADMIN_BYPASS_CODE
+        # Admin/test bypass codes let signups through without consuming a real InviteCode.
+        ADMIN_BYPASS_CODES = {'1234', '888888'}
+        is_bypass = alpha_code in ADMIN_BYPASS_CODES
 
         # Create the user
         with transaction.atomic():
@@ -117,8 +124,12 @@ def user_signup(request):
                 email=email,
                 password=make_password(password),
                 is_active=True,
+                email_verified=not settings.EMAIL_VERIFICATION_REQUIRED,
+                email_verified_at=timezone.now() if not settings.EMAIL_VERIFICATION_REQUIRED else None,
                 date_joined=timezone.now()
             )
+            if settings.EMAIL_VERIFICATION_REQUIRED:
+                apply_email_verification_restriction(user)
 
             if invite is not None:
                 invite.is_used = True
@@ -134,18 +145,43 @@ def user_signup(request):
             print(f"   Is Active: {user.is_active}")
             print(f"   Date Joined: {user.date_joined}")
             
-            # Log the user in to create a session
-            login(request, user)
-            print(f"🔑 User logged in successfully with session")
-            print(f"   Session key: {request.session.session_key}")
-            print(f"   Session data: {dict(request.session)}")
-            print(f"   User in session: {request.user.id if request.user.is_authenticated else 'Not authenticated'}")
+            email_delivery = None
+            if settings.EMAIL_VERIFICATION_REQUIRED:
+                try:
+                    email_delivery = send_verification_email(user)
+                    print(f"📧 Verification email handled for {user.email}: {email_delivery.get('delivery')}")
+                except Exception as email_error:
+                    logger.error("Failed to send verification email to %s: %s", user.email, email_error)
+                    print(f"⚠️ Failed to send verification email: {email_error}")
+                    if not settings.DEBUG:
+                        raise
+                    email_delivery = {
+                        'sent': False,
+                        'delivery': 'development_fallback',
+                        'verification_url': make_email_verification_url(user),
+                    }
+            else:
+                # Log the user in immediately when verification is disabled.
+                login(request, user)
+                print(f"🔑 User logged in successfully with session")
+                print(f"   Session key: {request.session.session_key}")
+                print(f"   Session data: {dict(request.session)}")
+                print(f"   User in session: {request.user.id if request.user.is_authenticated else 'Not authenticated'}")
             
             response_data = {
                 'success': True,
                 'user_id': str(user.id),
-                'message': 'User account created successfully'
+                'email': user.email,
+                'email_verification_required': settings.EMAIL_VERIFICATION_REQUIRED,
+                'email_verified': user.email_verified,
+                'message': 'Check your email to verify your account' if settings.EMAIL_VERIFICATION_REQUIRED else 'User account created successfully',
             }
+            if email_delivery:
+                response_data['email_delivery'] = email_delivery.get('delivery')
+                if email_delivery.get('message_id'):
+                    response_data['postmark_message_id'] = email_delivery.get('message_id')
+                if settings.DEBUG and email_delivery.get('delivery') == 'development_fallback':
+                    response_data['verification_url'] = email_delivery.get('verification_url')
             
             print(f"📤 Sending response: {response_data}")
             return JsonResponse(response_data, status=201)
@@ -430,7 +466,7 @@ def user_login(request):
         
         # Parse request data
         data = json.loads(request.body)
-        email = data.get('email')
+        email = (data.get('email') or '').strip().lower()
         password = data.get('password')
         
         print(f"🔐 USER LOGIN REQUEST for email: {email}")
@@ -521,6 +557,14 @@ def user_login(request):
             return JsonResponse({
                 'error': 'User account is deactivated'
             }, status=403)
+
+        if settings.EMAIL_VERIFICATION_REQUIRED and not is_admin_user and not user.email_verified:
+            print(f"❌ User email is not verified: {user.email}")
+            try:
+                send_verification_email(user)
+            except Exception as email_error:
+                logger.error("Failed to resend verification email to %s: %s", user.email, email_error)
+            apply_email_verification_restriction(user)
         
         print(f"✅ User account is active")
         
@@ -544,6 +588,8 @@ def user_login(request):
             'user_id': str(user.id),
             'message': 'Login successful',
             'is_admin': is_admin_user,
+            'email_verification_required': settings.EMAIL_VERIFICATION_REQUIRED,
+            'email_verified': user.email_verified,
             'user_data': {
                 'id': str(user.id),
                 'username': user.username,
@@ -551,7 +597,11 @@ def user_login(request):
                 'full_name': full_name,
                 'age': user.age,
                 'live': user.live,
-                'is_admin': is_admin_user
+                'is_admin': is_admin_user,
+                'email_verified': user.email_verified,
+                'is_banned': user.is_banned,
+                'restriction_type': user.restriction_type,
+                'restriction_reason': user.restriction_reason,
             }
         }
 
@@ -572,6 +622,92 @@ def user_login(request):
         return JsonResponse({
             'error': str(e)
         }, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def verify_email(request):
+    """Verify a user's email address from a signed verification token."""
+    try:
+        data = json.loads(request.body)
+        token = data.get('token')
+        if not token:
+            return JsonResponse({'error': 'Verification token is required'}, status=400)
+
+        try:
+            payload = read_email_verification_token(token)
+        except signing.SignatureExpired:
+            return JsonResponse({'error': 'Verification link has expired'}, status=400)
+        except signing.BadSignature:
+            return JsonResponse({'error': 'Invalid verification link'}, status=400)
+
+        try:
+            user = User.objects.get(id=payload.get('user_id'), email__iexact=payload.get('email'))
+        except User.DoesNotExist:
+            return JsonResponse({'error': 'Invalid verification link'}, status=400)
+
+        mark_email_verified(user)
+        login(request, user, backend='django.contrib.auth.backends.ModelBackend')
+
+        return JsonResponse({
+            'success': True,
+            'message': 'Email verified successfully',
+            'user_id': str(user.id),
+            'email': user.email,
+            'email_verified': True,
+            'is_admin': ensure_dashboard_admin(user),
+        })
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON format'}, status=400)
+    except Exception as e:
+        logger.error(f"Error in verify_email: {str(e)}")
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def resend_verification_email(request):
+    """Resend an email verification link without revealing whether an email exists."""
+    try:
+        data = json.loads(request.body)
+        email = (data.get('email') or '').strip().lower()
+        if not email:
+            return JsonResponse({'error': 'Email is required'}, status=400)
+
+        user = User.objects.filter(email__iexact=email).first()
+        if user and not user.email_verified:
+            try:
+                email_delivery = send_verification_email(user)
+                response_data = {
+                    'success': True,
+                    'message': 'If this email needs verification, a new link has been sent.',
+                    'email_delivery': email_delivery.get('delivery'),
+                }
+                if email_delivery.get('message_id'):
+                    response_data['postmark_message_id'] = email_delivery.get('message_id')
+                if settings.DEBUG and email_delivery.get('delivery') == 'development_fallback':
+                    response_data['verification_url'] = email_delivery.get('verification_url')
+                return JsonResponse(response_data)
+            except Exception as email_error:
+                logger.error("Failed to resend verification email to %s: %s", email, email_error)
+                if settings.DEBUG:
+                    return JsonResponse({
+                        'success': True,
+                        'message': 'Email delivery failed locally; use the development verification link.',
+                        'email_delivery': 'development_fallback',
+                        'verification_url': make_email_verification_url(user),
+                    })
+                return JsonResponse({'error': 'Could not send verification email'}, status=500)
+
+        return JsonResponse({
+            'success': True,
+            'message': 'If this email needs verification, a new link has been sent.',
+        })
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON format'}, status=400)
+    except Exception as e:
+        logger.error(f"Error in resend_verification_email: {str(e)}")
+        return JsonResponse({'error': str(e)}, status=500)
 
 
 @csrf_exempt

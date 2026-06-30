@@ -27,6 +27,8 @@ class User(AbstractUser):
     bio = models.TextField(max_length=500, blank=True)
     last_active = models.DateTimeField(default=timezone.now)
     is_banned = models.BooleanField(default=False)
+    email_verified = models.BooleanField(default=False)
+    email_verified_at = models.DateTimeField(null=True, blank=True)
     is_admin = models.BooleanField(
         default=False,
         help_text="Grants access to internal dashboard features."
