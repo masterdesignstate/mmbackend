@@ -13,10 +13,11 @@ from datetime import datetime
 from .models import User, InviteCode
 from .services.email_verification import (
     apply_email_verification_restriction,
-    make_email_verification_url,
     mark_email_verified,
     read_email_verification_token,
     send_verification_email,
+    set_email_verification_code,
+    verify_email_code,
 )
 from .utils.admin_utils import ensure_dashboard_admin
 
@@ -155,10 +156,12 @@ def user_signup(request):
                     print(f"⚠️ Failed to send verification email: {email_error}")
                     if not settings.DEBUG:
                         raise
+                    verification_code = set_email_verification_code(user)
+                    print(f"EMAIL VERIFICATION CODE for {user.email}: {verification_code}")
                     email_delivery = {
                         'sent': False,
                         'delivery': 'development_fallback',
-                        'verification_url': make_email_verification_url(user),
+                        'verification_code': verification_code,
                     }
             else:
                 # Log the user in immediately when verification is disabled.
@@ -181,7 +184,7 @@ def user_signup(request):
                 if email_delivery.get('message_id'):
                     response_data['postmark_message_id'] = email_delivery.get('message_id')
                 if settings.DEBUG and email_delivery.get('delivery') == 'development_fallback':
-                    response_data['verification_url'] = email_delivery.get('verification_url')
+                    response_data['verification_code'] = email_delivery.get('verification_code')
             
             print(f"📤 Sending response: {response_data}")
             return JsonResponse(response_data, status=201)
@@ -627,24 +630,37 @@ def user_login(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 def verify_email(request):
-    """Verify a user's email address from a signed verification token."""
+    """Verify a user's email address from a 6-digit code or legacy signed token."""
     try:
         data = json.loads(request.body)
         token = data.get('token')
-        if not token:
-            return JsonResponse({'error': 'Verification token is required'}, status=400)
 
-        try:
-            payload = read_email_verification_token(token)
-        except signing.SignatureExpired:
-            return JsonResponse({'error': 'Verification link has expired'}, status=400)
-        except signing.BadSignature:
-            return JsonResponse({'error': 'Invalid verification link'}, status=400)
+        if token:
+            try:
+                payload = read_email_verification_token(token)
+            except signing.SignatureExpired:
+                return JsonResponse({'error': 'Verification link has expired'}, status=400)
+            except signing.BadSignature:
+                return JsonResponse({'error': 'Invalid verification link'}, status=400)
 
-        try:
-            user = User.objects.get(id=payload.get('user_id'), email__iexact=payload.get('email'))
-        except User.DoesNotExist:
-            return JsonResponse({'error': 'Invalid verification link'}, status=400)
+            try:
+                user = User.objects.get(id=payload.get('user_id'), email__iexact=payload.get('email'))
+            except User.DoesNotExist:
+                return JsonResponse({'error': 'Invalid verification link'}, status=400)
+        else:
+            email = (data.get('email') or '').strip().lower()
+            code = data.get('code')
+            if not email:
+                return JsonResponse({'error': 'Email is required'}, status=400)
+
+            try:
+                user = User.objects.get(email__iexact=email)
+            except User.DoesNotExist:
+                return JsonResponse({'error': 'Invalid verification code'}, status=400)
+
+            is_valid, error_message = verify_email_code(user, code)
+            if not is_valid:
+                return JsonResponse({'error': error_message}, status=400)
 
         mark_email_verified(user)
         login(request, user, backend='django.contrib.auth.backends.ModelBackend')
@@ -667,7 +683,7 @@ def verify_email(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 def resend_verification_email(request):
-    """Resend an email verification link without revealing whether an email exists."""
+    """Resend an email verification code without revealing whether an email exists."""
     try:
         data = json.loads(request.body)
         email = (data.get('email') or '').strip().lower()
@@ -680,28 +696,30 @@ def resend_verification_email(request):
                 email_delivery = send_verification_email(user)
                 response_data = {
                     'success': True,
-                    'message': 'If this email needs verification, a new link has been sent.',
+                    'message': 'If this email needs verification, a new code has been sent.',
                     'email_delivery': email_delivery.get('delivery'),
                 }
                 if email_delivery.get('message_id'):
                     response_data['postmark_message_id'] = email_delivery.get('message_id')
                 if settings.DEBUG and email_delivery.get('delivery') == 'development_fallback':
-                    response_data['verification_url'] = email_delivery.get('verification_url')
+                    response_data['verification_code'] = email_delivery.get('verification_code')
                 return JsonResponse(response_data)
             except Exception as email_error:
                 logger.error("Failed to resend verification email to %s: %s", email, email_error)
                 if settings.DEBUG:
+                    verification_code = set_email_verification_code(user)
+                    print(f"EMAIL VERIFICATION CODE for {user.email}: {verification_code}")
                     return JsonResponse({
                         'success': True,
-                        'message': 'Email delivery failed locally; use the development verification link.',
+                        'message': 'Email delivery failed locally; use the development verification code.',
                         'email_delivery': 'development_fallback',
-                        'verification_url': make_email_verification_url(user),
+                        'verification_code': verification_code,
                     })
                 return JsonResponse({'error': 'Could not send verification email'}, status=500)
 
         return JsonResponse({
             'success': True,
-            'message': 'If this email needs verification, a new link has been sent.',
+            'message': 'If this email needs verification, a new code has been sent.',
         })
     except json.JSONDecodeError:
         return JsonResponse({'error': 'Invalid JSON format'}, status=400)

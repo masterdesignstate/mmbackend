@@ -29,6 +29,10 @@ class User(AbstractUser):
     is_banned = models.BooleanField(default=False)
     email_verified = models.BooleanField(default=False)
     email_verified_at = models.DateTimeField(null=True, blank=True)
+    email_verification_code_hash = models.CharField(max_length=128, blank=True, default='')
+    email_verification_code_sent_at = models.DateTimeField(null=True, blank=True)
+    email_verification_code_expires_at = models.DateTimeField(null=True, blank=True)
+    email_verification_code_attempts = models.PositiveSmallIntegerField(default=0)
     is_admin = models.BooleanField(
         default=False,
         help_text="Grants access to internal dashboard features."

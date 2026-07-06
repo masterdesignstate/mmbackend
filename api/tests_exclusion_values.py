@@ -38,13 +38,19 @@ class ExcludedAnswerValuesTests(TestCase):
         )
         self.assertEqual(_normalize_excluded_answer_values([1, 3, 5], question), [1, 3, 5])
 
-    def test_mandatory_endpoint_only_exclusions(self):
-        for question_number in [2, 3, 5, 7]:
+    def test_scale_based_mandatory_exclusions_allow_full_scale(self):
+        for question_number in [2, 3, 7, 8, 11]:
             question = self.make_question(question_number)
-            self.assertEqual(_allowed_excluded_answer_values_for_question(question), {1, 5})
-            self.assertEqual(_normalize_excluded_answer_values([1, 5], question), [1, 5])
-            with self.assertRaises(ValueError):
-                _normalize_excluded_answer_values([2], question)
+            self.assertEqual(_allowed_excluded_answer_values_for_question(question), {1, 2, 3, 4, 5})
+            self.assertEqual(_normalize_excluded_answer_values([1, 2, 3, 4, 5], question), [1, 2, 3, 4, 5])
+
+    def test_excluded_values_drop_own_answer(self):
+        question = self.make_question(7)
+
+        self.assertEqual(
+            _normalize_excluded_answer_values([1, 3, 5], question, own_answer=3),
+            [1, 5],
+        )
 
     def test_education_exclusions_only_allow_three_points(self):
         question = self.make_question(4, values=[1, 3, 5])
@@ -67,7 +73,7 @@ class ExcludedAnswerValuesTests(TestCase):
         self.assertEqual(_normalize_excluded_answer_values([1, 2, 3, 4, 5], kids_want), [1, 2, 3, 4, 5])
 
     def test_apply_path_can_drop_stale_unsupported_values(self):
-        question = self.make_question(3)
+        question = self.make_question(5, values=[1, 5])
 
         self.assertEqual(
             _normalize_excluded_answer_values([1, 2, 5], question, drop_unsupported=True),
@@ -87,6 +93,12 @@ class ExcludedAnswerValuesTests(TestCase):
             _normalize_question_answer_value(4, education)
         with self.assertRaises(ValueError):
             _normalize_question_answer_value(3, kids_have)
+
+    def test_faith_answer_values_allow_full_scale_even_with_endpoint_rows(self):
+        faith = self.make_question(11, values=[1, 5])
+
+        self.assertEqual(_normalize_question_answer_value(3, faith), 3)
+        self.assertEqual(_normalize_question_answer_value(4, faith), 4)
 
 
 class ImportanceExclusionTests(TestCase):

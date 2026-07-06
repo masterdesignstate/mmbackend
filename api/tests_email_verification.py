@@ -1,5 +1,3 @@
-from urllib.parse import parse_qs, urlparse
-
 from django.test import TestCase, override_settings
 
 from .models import User, UserRestrictionHistory
@@ -27,6 +25,7 @@ class EmailVerificationTests(TestCase):
         signup_data = signup.json()
         self.assertTrue(signup_data["email_verification_required"])
         self.assertFalse(signup_data["email_verified"])
+        self.assertEqual(len(signup_data["verification_code"]), 6)
 
         user = User.objects.get(email="new@example.com")
         self.assertFalse(user.email_verified)
@@ -49,10 +48,24 @@ class EmailVerificationTests(TestCase):
         self.assertTrue(login.json()["email_verification_required"])
         self.assertFalse(login.json()["email_verified"])
 
-        token = parse_qs(urlparse(signup_data["verification_url"]).query)["token"][0]
+        resend = self.client.post(
+            "/api/auth/resend-verification-email/",
+            data={"email": "new@example.com"},
+            content_type="application/json",
+        )
+        self.assertEqual(resend.status_code, 200)
+        verification_code = resend.json()["verification_code"]
+
+        bad_verify = self.client.post(
+            "/api/auth/verify-email/",
+            data={"email": "new@example.com", "code": "000000"},
+            content_type="application/json",
+        )
+        self.assertEqual(bad_verify.status_code, 400)
+
         verify = self.client.post(
             "/api/auth/verify-email/",
-            data={"token": token},
+            data={"email": "new@example.com", "code": verification_code},
             content_type="application/json",
         )
         self.assertEqual(verify.status_code, 200)

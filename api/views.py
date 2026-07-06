@@ -20,6 +20,7 @@ from .models import (
     PromptTemplate, UserProfilePrompt, PromptPollVote,
 )
 from .services.compatibility_service import CompatibilityService
+from .services.dummy_activity import create_user_result_with_notifications, simulate_dummy_reciprocation
 from .services.email_verification import apply_email_verification_restriction, send_verification_email
 from .analytics import capture as posthog_capture
 from .services.compatibility_queue import (
@@ -54,6 +55,9 @@ def _coerce_bool(value):
 
 def _allowed_answer_values_for_question(question):
     if not question:
+        return DEFAULT_EXCLUDED_ANSWER_VALUES
+
+    if question.question_number == 11:
         return DEFAULT_EXCLUDED_ANSWER_VALUES
 
     answer_values = set()
@@ -92,9 +96,9 @@ def _allowed_excluded_answer_values_for_question(question):
     question_number = question.question_number
     question_name = (question.question_name or '').strip().lower()
 
-    # These mandatory groups are endpoint-style for exclusion purposes.
-    if question_number in {2, 3, 5, 7}:
-        return {1, 5}
+    # Exclusions are scale-based for these questions even when the answer UI is grouped.
+    if question_number in {2, 3, 7, 8, 11}:
+        return DEFAULT_EXCLUDED_ANSWER_VALUES
 
     if question_number == 4:
         return {1, 3, 5}
@@ -105,13 +109,17 @@ def _allowed_excluded_answer_values_for_question(question):
     return _allowed_answer_values_for_question(question)
 
 
-def _normalize_excluded_answer_values(value, question=None, drop_unsupported=False):
+def _normalize_excluded_answer_values(value, question=None, drop_unsupported=False, own_answer=None):
     if value in (None, ''):
         return []
     if not isinstance(value, list):
         raise ValueError('excluded_answer_values must be a list')
 
     allowed_values = _allowed_excluded_answer_values_for_question(question)
+    try:
+        own_answer_value = int(own_answer) if own_answer is not None else None
+    except (TypeError, ValueError):
+        own_answer_value = None
     normalized = []
     for raw_value in value:
         try:
@@ -127,6 +135,8 @@ def _normalize_excluded_answer_values(value, question=None, drop_unsupported=Fal
             raise ValueError(
                 f'excluded_answer_values for this question can only contain: {allowed_display}'
             )
+        if own_answer_value == answer_value:
+            continue
         if answer_value not in normalized:
             normalized.append(answer_value)
     return normalized
@@ -158,6 +168,7 @@ def _apply_answer_exclusions(compatibilities, current_user):
     current_answers = UserAnswer.objects.filter(user=current_user).select_related('question').only(
         'question_id',
         'excluded_answer_values',
+        'me_answer',
         'question__question_number',
         'question__question_name',
         'question__group_number',
@@ -168,6 +179,7 @@ def _apply_answer_exclusions(compatibilities, current_user):
             answer.excluded_answer_values,
             question=answer.question,
             drop_unsupported=True,
+            own_answer=answer.me_answer,
         )
         if excluded_values:
             excluded_by_question[answer.question_id] = excluded_values
@@ -2865,6 +2877,7 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
                 excluded_answer_values = _normalize_excluded_answer_values(
                     request.data.get('excluded_answer_values', []),
                     question=question,
+                    own_answer=me_answer,
                 )
             except ValueError as e:
                 return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -3004,6 +3017,7 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
                     instance.excluded_answer_values = _normalize_excluded_answer_values(
                         data.get('excluded_answer_values'),
                         question=instance.question,
+                        own_answer=instance.me_answer,
                     )
                 except ValueError as e:
                     return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -3254,53 +3268,9 @@ class UserResultViewSet(viewsets.ModelViewSet):
                             status=status.HTTP_403_FORBIDDEN,
                         )
 
-            # Tag doesn't exist, add it
-            user_result = UserResult.objects.create(
-                user=user,
-                result_user=result_user,
-                tag=tag
-            )
-
-            # Create notification for approve, like, or match
-            notification_type = None
-            if tag == 'approve':
-                notification_type = 'approve'
-            elif tag == 'like':
-                notification_type = 'like'
-                # Check if this creates a match (mutual like)
-                mutual_like = UserResult.objects.filter(
-                    user=result_user,
-                    result_user=user,
-                    tag='like'
-                ).exists()
-
-                if mutual_like:
-                    # Create match notification for both users
-                    Notification.objects.create(
-                        recipient=user,
-                        sender=result_user,
-                        notification_type='match',
-                        related_user_result=user_result
-                    )
-                    Notification.objects.create(
-                        recipient=result_user,
-                        sender=user,
-                        notification_type='match',
-                        related_user_result=user_result
-                    )
-                    logger.info(f"Created match notifications between {user.username} and {result_user.username}")
-                    posthog_capture(str(user.id), 'match_created_server', {'matched_user_id': str(result_user.id)})
-                    posthog_capture(str(result_user.id), 'match_created_server', {'matched_user_id': str(user.id)})
-
-            # Create notification for approve or like
-            if notification_type:
-                Notification.objects.create(
-                    recipient=result_user,
-                    sender=user,
-                    notification_type=notification_type,
-                    related_user_result=user_result
-                )
-                logger.info(f"Created {notification_type} notification from {user.username} to {result_user.username}")
+            user_result, _ = create_user_result_with_notifications(user, result_user, tag)
+            if tag in {'approve', 'like'}:
+                simulate_dummy_reciprocation(user_result)
 
             serializer = self.get_serializer(user_result)
             return Response({

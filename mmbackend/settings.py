@@ -202,6 +202,11 @@ EMAIL_VERIFICATION_TOKEN_MAX_AGE_SECONDS = config(
     default=60 * 60 * 24 * 3,
     cast=int,
 )
+EMAIL_VERIFICATION_CODE_MAX_AGE_SECONDS = config(
+    'EMAIL_VERIFICATION_CODE_MAX_AGE_SECONDS',
+    default=60 * 15,
+    cast=int,
+)
 FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:3000')
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='hello@matchmatical.com')
 POSTMARK_SERVER_TOKEN = config('POSTMARK_SERVER_TOKEN', default='')
