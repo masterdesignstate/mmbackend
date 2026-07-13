@@ -1,6 +1,7 @@
 from django.test import TestCase, override_settings
 
 from .models import User, UserRestrictionHistory
+from .services.email_verification import build_verification_email_bodies
 
 
 @override_settings(
@@ -10,6 +11,25 @@ from .models import User, UserRestrictionHistory
     DEBUG=True,
 )
 class EmailVerificationTests(TestCase):
+    def test_verification_email_uses_branded_template(self):
+        user = User.objects.create_user(
+            username="template@example.com",
+            email="template@example.com",
+            password="password123",
+        )
+
+        text_body, html_body = build_verification_email_bodies(user, "123456", 15)
+
+        self.assertIn("Welcome to Matchmatical", text_body)
+        self.assertIn("123456", text_body)
+        self.assertIn("/auth/verify-email?", text_body)
+        self.assertIn("Matchmatical", html_body)
+        self.assertIn("Verify your email", html_body)
+        self.assertIn("123456", html_body)
+        self.assertNotIn("<img", html_body)
+        self.assertIn("background:#672DB7", html_body)
+        self.assertIn("/auth/verify-email?", html_body)
+
     def test_signup_requires_email_verification_before_login(self):
         signup = self.client.post(
             "/api/auth/signup/",

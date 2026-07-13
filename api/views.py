@@ -2696,13 +2696,15 @@ class QuestionViewSet(viewsets.ModelViewSet):
 
             if is_grouped:
                 # For grouped: count unique users who answered ANY question in group
+                # Uses the prefetched user_answers cache from line above instead of a fresh query per question
                 user_ids = set()
                 for question in question_group:
-                    user_ids.update(UserAnswer.objects.filter(question=question).values_list('user_id', flat=True))
+                    user_ids.update(ua.user_id for ua in question.user_answers.all())
                 answer_counts[question_number] = len(user_ids)
             else:
                 # For individual: count users who answered this specific question
-                answer_counts[question_number] = UserAnswer.objects.filter(question=question_group[0]).values('user').distinct().count()
+                user_ids = {ua.user_id for ua in question_group[0].user_answers.all()}
+                answer_counts[question_number] = len(user_ids)
 
         # Prepare response data
         metadata = {
@@ -3461,10 +3463,36 @@ class PictureModerationViewSet(viewsets.ModelViewSet):
     ordering_fields = ['submitted_at', 'moderated_at', 'status']
     ordering = ['-submitted_at']
 
+    def _get_admin_user(self, request):
+        """Resolve the acting admin from an explicit user_id (query param or
+        body). Accepts either the custom is_admin flag (the convention used
+        by broadcast_history/_resolve_viewer) or Django's built-in is_staff
+        (what the original, pre-fix code checked) -- some real accounts have
+        one set but not the other. Returns None if missing/invalid rather
+        than raising, so callers can fail closed.
+        """
+        user_id = request.query_params.get('user_id')
+        if not user_id:
+            try:
+                user_id = (request.data or {}).get('user_id')
+            except Exception:
+                user_id = None
+        if not user_id:
+            return None
+        try:
+            user = User.objects.get(id=user_id)
+        except Exception:
+            return None
+        if user.is_admin or user.is_staff:
+            return user
+        return None
+
     def get_queryset(self):
-        if self.request.user.is_staff:
+        if self._get_admin_user(self.request):
             return PictureModeration.objects.all()
-        return PictureModeration.objects.filter(user=self.request.user)
+        if self.request.user.is_authenticated:
+            return PictureModeration.objects.filter(user=self.request.user)
+        return PictureModeration.objects.none()
 
     def perform_create(self, serializer):
         serializer.save()
@@ -3472,10 +3500,9 @@ class PictureModerationViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def pending(self, request):
         """Get pending picture moderations (admin only)"""
-        # Removed staff requirement for testing
-        # if not request.user.is_staff:
-        #     return Response({'error': 'Staff only'}, status=403)
-        
+        if not self._get_admin_user(request):
+            return Response({'error': 'Admin only'}, status=403)
+
         pending_moderations = PictureModeration.objects.filter(status='pending')
         serializer = self.get_serializer(pending_moderations, many=True)
         return Response(serializer.data)
@@ -3483,10 +3510,9 @@ class PictureModerationViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def queue(self, request):
         """Get picture moderation queue (admin only)"""
-        # Removed staff requirement for testing
-        # if not request.user.is_staff:
-        #     return Response({'error': 'Staff only'}, status=403)
-        
+        if not self._get_admin_user(request):
+            return Response({'error': 'Admin only'}, status=403)
+
         # Get pending moderations with user details
         moderations = PictureModeration.objects.filter(status='pending').select_related('user')
         
@@ -3519,9 +3545,8 @@ class PictureModerationViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
         """Approve a picture (admin only)"""
-        # Removed staff requirement for testing
-        # if not request.user.is_staff:
-        #     return Response({'error': 'Staff only'}, status=403)
+        if not self._get_admin_user(request):
+            return Response({'error': 'Admin only'}, status=403)
 
         moderation = self.get_object()
 
@@ -3545,18 +3570,17 @@ class PictureModerationViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
         """Reject a picture (admin only)"""
-        # Removed staff requirement for testing
-        # if not request.user.is_staff:
-        #     return Response({'error': 'Staff only'}, status=403)
-        
+        if not self._get_admin_user(request):
+            return Response({'error': 'Admin only'}, status=403)
+
         moderation = self.get_object()
         reason = request.data.get('reason', '')
         
         moderation.status = 'rejected'
-        moderation.rejection_reason = reason
+        moderation.moderator_notes = reason
         moderation.moderated_at = timezone.now()
         moderation.save()
-        
+
         return Response({'status': 'rejected'})
 
 

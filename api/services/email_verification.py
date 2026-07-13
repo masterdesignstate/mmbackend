@@ -44,6 +44,56 @@ def make_email_verification_code():
     return f"{secrets.randbelow(10 ** EMAIL_VERIFICATION_CODE_LENGTH):0{EMAIL_VERIFICATION_CODE_LENGTH}d}"
 
 
+def build_verification_email_bodies(user, verification_code, expiry_minutes):
+    verification_url = make_email_verification_url(user)
+    text_body = (
+        "Welcome to Matchmatical.\n\n"
+        f"Your verification code is: {verification_code}\n\n"
+        f"Or verify your email here: {verification_url}\n\n"
+        f"This code expires in {expiry_minutes} minutes.\n\n"
+        "If you did not create this account, you can ignore this email."
+    )
+    html_body = f"""
+<!doctype html>
+<html>
+  <body style="margin:0;padding:0;background:#f6f3fb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f6f3fb;margin:0;padding:32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#ffffff;border:1px solid #e7e2f2;border-radius:20px;overflow:hidden;box-shadow:0 16px 40px rgba(103,45,183,0.12);">
+            <tr>
+              <td style="padding:28px 32px 18px 32px;text-align:center;background:#ffffff;">
+                <div style="font-size:14px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:#672DB7;">Matchmatical</div>
+                <h1 style="margin:12px 0 8px 0;font-size:28px;line-height:1.2;font-weight:800;color:#111827;">Verify your email</h1>
+                <p style="margin:0 auto;max-width:420px;font-size:15px;line-height:1.6;color:#6b7280;">Enter this code in the app to finish setting up your account.</p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:8px 32px 6px 32px;text-align:center;">
+                <div style="display:inline-block;padding:18px 24px;border-radius:16px;background:#f4effc;border:1px solid #ded2f1;color:#2f1558;font-size:34px;line-height:1;font-weight:800;letter-spacing:0.22em;">{verification_code}</div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:18px 32px 8px 32px;text-align:center;">
+                <a href="{verification_url}" style="display:inline-block;background:#672DB7;color:#ffffff;text-decoration:none;border-radius:12px;padding:14px 22px;font-size:15px;font-weight:700;">Verify email</a>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:12px 32px 30px 32px;text-align:center;">
+                <p style="margin:0;font-size:13px;line-height:1.6;color:#6b7280;">This code expires in {expiry_minutes} minutes.</p>
+                <p style="margin:10px 0 0 0;font-size:12px;line-height:1.6;color:#9ca3af;">If you did not create this account, you can safely ignore this email.</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+""".strip()
+    return text_body, html_body
+
+
 def set_email_verification_code(user):
     code = make_email_verification_code()
     now = timezone.now()
@@ -95,6 +145,7 @@ def send_verification_email(user):
     from_email = settings.DEFAULT_FROM_EMAIL
     postmark_token = getattr(settings, "POSTMARK_SERVER_TOKEN", "")
     expiry_minutes = max(settings.EMAIL_VERIFICATION_CODE_MAX_AGE_SECONDS // 60, 1)
+    text_body, html_body = build_verification_email_bodies(user, verification_code, expiry_minutes)
 
     if not postmark_token:
         logger.warning("POSTMARK_SERVER_TOKEN is not configured; verification code for %s: %s", user.email, verification_code)
@@ -115,20 +166,9 @@ def send_verification_email(user):
         json={
             "From": from_email,
             "To": user.email,
-            "Subject": "Your verification code",
-            "TextBody": (
-                "Welcome to Matchmatical.\n\n"
-                f"Your verification code is: {verification_code}\n\n"
-                f"This code expires in {expiry_minutes} minutes.\n\n"
-                "If you did not create this account, you can ignore this email."
-            ),
-            "HtmlBody": (
-                "<p>Welcome to Matchmatical.</p>"
-                "<p>Enter this code to verify your email:</p>"
-                f'<p style="font-size:32px;letter-spacing:8px;font-weight:700;margin:24px 0;">{verification_code}</p>'
-                f"<p>This code expires in {expiry_minutes} minutes.</p>"
-                "<p>If you did not create this account, you can ignore this email.</p>"
-            ),
+            "Subject": "Verify your Matchmatical email",
+            "TextBody": text_body,
+            "HtmlBody": html_body,
             "MessageStream": getattr(settings, "POSTMARK_MESSAGE_STREAM", "outbound"),
         },
         timeout=10,
