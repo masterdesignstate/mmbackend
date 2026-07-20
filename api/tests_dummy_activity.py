@@ -9,6 +9,7 @@ from rest_framework.test import APIClient
 
 from api.models import (
     CompatibilityJob,
+    Controls,
     FeedActivity,
     Notification,
     Post,
@@ -121,18 +122,28 @@ class DummyRequiredQuestionCatchupTests(TestCase):
                 )
             self.required_questions.append(question)
 
-        self.dummy_users = {
+        # The required-question catch-up acts on REAL users only, so the
+        # candidate pool here is non-dummy. The protected usernames are created
+        # as real users too -- as dummies they would be excluded by the dummy
+        # filter and the protection check would never actually be exercised.
+        self.real_users = {
             username: User.objects.create_user(
                 username=username,
-                email=f"{username}@{DUMMY_EMAIL_DOMAIN}",
+                email=f"{username}@example.com",
                 password="pass123",
+                is_dummy=False,
             )
             for username in [
-                "dummyone", "dummytwo", "dummythree", "dummyfour", "dummyfive", "dummysix",
+                "realone", "realtwo", "realthree", "realfour", "realfive", "realsix",
                 "oliviastacey", "jackperez",
             ]
         }
-        self.real_user = User.objects.create_user(username="realuser", email="real@example.com", password="pass123")
+        self.dummy_user = User.objects.create_user(
+            username="dummyone",
+            email=f"dummyone@{DUMMY_EMAIL_DOMAIN}",
+            password="pass123",
+            is_dummy=True,
+        )
 
     def _require(self, user, question, backdated=True):
         req = UserRequiredQuestion.objects.create(user=user, question=question)
@@ -144,7 +155,7 @@ class DummyRequiredQuestionCatchupTests(TestCase):
         return set(UserAnswer.objects.filter(user=user).values_list("question_id", flat=True))
 
     def test_answers_all_pending_required_questions_for_selected_user(self):
-        user = self.dummy_users["dummyone"]
+        user = self.real_users["realone"]
         for question in self.required_questions:
             self._require(user, question)
 
@@ -160,7 +171,7 @@ class DummyRequiredQuestionCatchupTests(TestCase):
         self.assertEqual(result["users_touched"], 1)
 
     def test_idempotent_on_rerun_same_day(self):
-        user = self.dummy_users["dummyone"]
+        user = self.real_users["realone"]
         for question in self.required_questions:
             self._require(user, question)
 
@@ -175,7 +186,7 @@ class DummyRequiredQuestionCatchupTests(TestCase):
         self.assertEqual(FeedActivity.objects.filter(kind="question_answered").count(), first_activity_count)
 
     def test_prioritizes_users_with_pending_gap(self):
-        gapped = [self.dummy_users["dummyone"], self.dummy_users["dummytwo"]]
+        gapped = [self.real_users["realone"], self.real_users["realtwo"]]
         for user in gapped:
             self._require(user, self.required_questions[0])
 
@@ -185,28 +196,71 @@ class DummyRequiredQuestionCatchupTests(TestCase):
         answered_usernames = set(
             UserAnswer.objects.filter(question=self.required_questions[0]).values_list("user__username", flat=True)
         )
-        self.assertEqual(answered_usernames, {"dummyone", "dummytwo"})
+        self.assertEqual(answered_usernames, {"realone", "realtwo"})
 
     def test_never_touches_protected_users(self):
         for username in ("oliviastacey", "jackperez"):
-            self._require(self.dummy_users[username], self.required_questions[0])
+            self._require(self.real_users[username], self.required_questions[0])
 
         with patch("api.services.dummy_activity.timezone.now", return_value=self.now):
             fill_due_dummy_required_question_answers(daily_count=8)
 
-        self.assertEqual(self._answered_question_ids(self.dummy_users["oliviastacey"]), set())
-        self.assertEqual(self._answered_question_ids(self.dummy_users["jackperez"]), set())
+        self.assertEqual(self._answered_question_ids(self.real_users["oliviastacey"]), set())
+        self.assertEqual(self._answered_question_ids(self.real_users["jackperez"]), set())
 
-    def test_ignores_non_dummy_users(self):
-        self._require(self.real_user, self.required_questions[0])
+    def test_ignores_dummy_users(self):
+        """The simulator must never fabricate required answers on a seeded profile."""
+        self._require(self.dummy_user, self.required_questions[0])
 
         with patch("api.services.dummy_activity.timezone.now", return_value=self.now):
             fill_due_dummy_required_question_answers(daily_count=8)
 
-        self.assertEqual(self._answered_question_ids(self.real_user), set())
+        self.assertEqual(self._answered_question_ids(self.dummy_user), set())
+
+    def test_ignores_dummy_user_flagged_only_by_email_domain(self):
+        """Fallback path: a legacy row whose is_dummy was never backfilled is
+        still recognised as dummy via its email domain."""
+        legacy = User.objects.create_user(
+            username="legacydummy",
+            email=f"legacydummy@{DUMMY_EMAIL_DOMAIN}",
+            password="pass123",
+            is_dummy=False,
+        )
+        self._require(legacy, self.required_questions[0])
+
+        with patch("api.services.dummy_activity.timezone.now", return_value=self.now):
+            fill_due_dummy_required_question_answers(daily_count=8)
+
+        self.assertEqual(self._answered_question_ids(legacy), set())
+
+    def test_skips_when_required_toggle_disabled(self):
+        user = self.real_users["realone"]
+        self._require(user, self.required_questions[0])
+        controls = Controls.get_current()
+        controls.auto_answer_required_enabled = False
+        controls.save()
+
+        with patch("api.services.dummy_activity.timezone.now", return_value=self.now):
+            result = fill_due_dummy_required_question_answers(daily_count=6)
+
+        self.assertEqual(result["skipped"], "disabled")
+        self.assertEqual(self._answered_question_ids(user), set())
+
+    def test_master_toggle_disables_required_catchup(self):
+        user = self.real_users["realone"]
+        self._require(user, self.required_questions[0])
+        controls = Controls.get_current()
+        controls.auto_updater_enabled = False
+        controls.save()
+
+        with patch("api.services.dummy_activity.timezone.now", return_value=self.now):
+            result = fill_due_dummy_required_question_answers(daily_count=6)
+
+        self.assertEqual(result["skipped"], "disabled")
+        self.assertEqual(self._answered_question_ids(user), set())
 
     def test_triggers_compatibility_job_once_threshold_crossed(self):
-        user = self.dummy_users["dummyone"]
+        user = self.real_users["realone"]
 
         # Nine pre-existing (non-required) answers so this user is one answer
         # away from MIN_MATCHABLE_ANSWERS = 10.
@@ -232,7 +286,7 @@ class DummyRequiredQuestionCatchupTests(TestCase):
         self.assertTrue(CompatibilityJob.objects.filter(user=user).exists())
 
     def test_dry_run_reports_without_writing(self):
-        user = self.dummy_users["dummyone"]
+        user = self.real_users["realone"]
         for question in self.required_questions:
             self._require(user, question)
 

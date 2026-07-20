@@ -431,6 +431,13 @@ class UserViewSet(viewsets.ModelViewSet):
             return DetailedUserSerializer
         return UserSerializer
 
+    def get_serializer_context(self):
+        """DetailedUserSerializer nests UserAnswerSerializer, so notes need a visibility resolver here too."""
+        context = super().get_serializer_context()
+        viewer, _ = _resolve_viewer(self.request)
+        context['note_visible_author_ids'] = NoteVisibilityResolver(viewer)
+        return context
+
     def retrieve(self, request, *args, **kwargs):
         """Auto-unban users whose temporary restriction has expired"""
         instance = self.get_object()
@@ -452,7 +459,12 @@ class UserViewSet(viewsets.ModelViewSet):
             return Response({'error': 'Authentication required'}, status=401)
         
         print(f"✅ User authenticated: {request.user.id}")
-        serializer = DetailedUserSerializer(request.user)
+        # Built directly rather than via get_serializer(), so the note context must be
+        # passed explicitly or the user loses their own notes on their own profile.
+        serializer = DetailedUserSerializer(
+            request.user,
+            context={'request': request, 'note_visible_author_ids': NoteVisibilityResolver(request.user)},
+        )
         return Response(serializer.data)
 
     # ----- Picture gallery (up to UserPicture.MAX_PER_USER per user) -----
@@ -771,8 +783,11 @@ class UserViewSet(viewsets.ModelViewSet):
         # Allow user_id parameter for frontend compatibility
         user_id_param = request.query_params.get('user_id')
         if user_id_param:
-            from django.contrib.auth import get_user_model
-            User = get_user_model()
+            # NB: this used to do `User = get_user_model()` here, which made
+            # `User` a function-local name for the whole of compatible() and
+            # raised UnboundLocalError on every later `User.…` reference when
+            # user_id wasn't supplied. `User` is already imported at module
+            # level, so just use that.
             try:
                 request.user = User.objects.get(id=user_id_param)
                 print(f"Using provided user ID: {request.user.username} (ID: {request.user.id})")
@@ -929,11 +944,11 @@ class UserViewSet(viewsets.ModelViewSet):
                 if required_scope == 'their':
                     compatibilities = Compatibility.objects.filter(
                         Q(user1=request.user) | Q(user2=request.user)
-                    ).select_related('user1', 'user2').annotate(**annotate_kwargs).order_by('-my_completeness_toward_them', '-compatibility_score')
+                    ).select_related('user1', 'user2').annotate(**annotate_kwargs).order_by('-my_completeness_toward_them', '-compatibility_score', 'id')
                 else:
                     compatibilities = Compatibility.objects.filter(
                         Q(user1=request.user) | Q(user2=request.user)
-                    ).select_related('user1', 'user2').annotate(**annotate_kwargs).order_by('-their_completeness', '-compatibility_score')
+                    ).select_related('user1', 'user2').annotate(**annotate_kwargs).order_by('-their_completeness', '-compatibility_score', 'id')
             else:
                 compatibilities = Compatibility.objects.filter(
                     Q(user1=request.user) | Q(user2=request.user)
@@ -951,7 +966,7 @@ class UserViewSet(viewsets.ModelViewSet):
                         default='user1_required_completeness',
                         output_field=FloatField()
                     )
-                ).order_by('-their_completeness', '-compatibility_score')
+                ).order_by('-their_completeness', '-compatibility_score', 'id')
 
             # Apply compatibility filters based on selected compatibility type
             if not apply_required_filter:
@@ -1137,10 +1152,18 @@ class UserViewSet(viewsets.ModelViewSet):
             if search_term:
                 search_lower = search_term.lower()
                 if search_field == 'name':
-                    # Filter by first_name (case-insensitive contains)
+                    # Filter by first or last name (case-insensitive contains).
+                    # Matching first_name alone made a last-name search return
+                    # nothing at all rather than falling back.
                     compatibilities = compatibilities.filter(
-                        Q(user1=request.user, user2__first_name__icontains=search_term) |
-                        Q(user2=request.user, user1__first_name__icontains=search_term)
+                        Q(user1=request.user) & (
+                            Q(user2__first_name__icontains=search_term) |
+                            Q(user2__last_name__icontains=search_term)
+                        ) |
+                        Q(user2=request.user) & (
+                            Q(user1__first_name__icontains=search_term) |
+                            Q(user1__last_name__icontains=search_term)
+                        )
                     )
                     print(f"🔍 Applied name search filter: '{search_term}'")
                 elif search_field == 'username':
@@ -2189,6 +2212,9 @@ class QuestionViewSet(viewsets.ModelViewSet):
         """Ensure request context is passed to serializer"""
         context = super().get_serializer_context()
         context['request'] = self.request
+        # DetailedQuestionSerializer nests UserAnswerSerializer via user_answers.
+        viewer, _ = _resolve_viewer(self.request)
+        context['note_visible_author_ids'] = NoteVisibilityResolver(viewer)
         return context
 
     def create(self, request, *args, **kwargs):
@@ -2782,6 +2808,35 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
             else:
                 UserRequiredQuestion.objects.filter(user=user, question=question).delete()
 
+    ME_NOTE_MAX_LENGTH = 280
+
+    @staticmethod
+    def _clean_me_note(raw_value):
+        """Normalize and validate a me_note payload value.
+
+        Returns (note_text, error_response_or_None). Rejects with a 400 like feed
+        posts do rather than banning the user the way identity fields (bio, username)
+        do -- an answer note is ephemeral content, not an identity claim.
+        """
+        note = (raw_value or '')
+        if not isinstance(note, str):
+            return None, Response({'error': 'Note must be text.'}, status=status.HTTP_400_BAD_REQUEST)
+        note = note.strip()
+        if len(note) > UserAnswerViewSet.ME_NOTE_MAX_LENGTH:
+            return None, Response(
+                {'error': f'Note too long (max {UserAnswerViewSet.ME_NOTE_MAX_LENGTH} chars).'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if note:
+            from api.utils.word_filter import validate_text_fields
+            has_restricted, found_words = validate_text_fields(answer_note=note)
+            if has_restricted:
+                return None, Response(
+                    {'error': f'Note contains restricted words: {", ".join(found_words)}'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        return note, None
+
     @staticmethod
     def _sync_answered_count(user):
         actual_count = UserAnswer.objects.filter(user=user).count()
@@ -2808,6 +2863,16 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(question__question_number=question_number)
 
         return queryset
+
+    def get_serializer_context(self):
+        """Wire note visibility so UserAnswerSerializer can strip notes the viewer may not read.
+
+        Covers list, retrieve and by_question, since all three go through get_serializer().
+        """
+        context = super().get_serializer_context()
+        viewer, _ = _resolve_viewer(self.request)
+        context['note_visible_author_ids'] = NoteVisibilityResolver(viewer)
+        return context
 
     @action(detail=False, methods=['get'], url_path='my_answered_questions')
     def my_answered_questions(self, request):
@@ -2884,6 +2949,12 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
             except ValueError as e:
                 return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+            me_note = None
+            if 'me_note' in request.data:
+                me_note, note_error = self._clean_me_note(request.data.get('me_note'))
+                if note_error is not None:
+                    return note_error
+
             # Sync UserRequiredQuestion (required for me is stored there; user can require without answering)
             self._sync_required_question(
                 user,
@@ -2905,6 +2976,11 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
             }
             if 'excluded_answer_values' in request.data:
                 defaults['excluded_answer_values'] = excluded_answer_values
+            # Only when explicitly supplied: several answer-save flows POST without a
+            # note, and an unconditional default would blank an existing one.
+            if 'me_note' in request.data:
+                defaults['me_note'] = me_note
+                defaults['me_note_updated_at'] = timezone.now()
 
             user_answer, created = UserAnswer.objects.update_or_create(
                 user=user,
@@ -3023,6 +3099,16 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
                     )
                 except ValueError as e:
                     return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Handled outside the setattr loop above so the note gets length and
+            # restricted-word validation instead of being written through raw.
+            if 'me_note' in data:
+                new_note, note_error = self._clean_me_note(data.get('me_note'))
+                if note_error is not None:
+                    return note_error
+                if new_note != (instance.me_note or ''):
+                    instance.me_note = new_note
+                    instance.me_note_updated_at = timezone.now()
 
             instance.save()
 
@@ -4661,6 +4747,60 @@ def _post_visibility_filter(viewer):
         Q(visibility='liked', author_id__in=authors_liking_me) |
         Q(visibility='matched', author_id__in=authors_matching_me)
     )
+
+
+class NoteVisibilityResolver:
+    """Membership test for 'may `viewer` read this author's answer notes?'
+
+    Mirrors the relationship logic of _activity_visibility_filter, but resolves per
+    author id rather than to a Q: the answer row must still be returned to the
+    viewer, only the note *field* is hidden. Consumed via serializer context as
+    `note_visible_author_ids` -- see UserAnswerSerializer.get_me_note, which tests
+    `author_id in <this object>`.
+
+    Relationship sets and per-author settings are loaded lazily on first use and
+    cached, so wiring this into a viewset's serializer context costs nothing on
+    requests where no answer actually carries a note.
+    """
+
+    def __init__(self, viewer):
+        self.viewer = viewer
+        self._relationships = None
+        self._visibility_cache = {}
+
+    def _load_relationships(self):
+        if self._relationships is None:
+            viewer = self.viewer
+            approving = set(UserResult.objects.filter(result_user=viewer, tag='approve').values_list('user_id', flat=True))
+            liking = set(UserResult.objects.filter(result_user=viewer, tag='like').values_list('user_id', flat=True))
+            my_likes = set(UserResult.objects.filter(user=viewer, tag='like').values_list('result_user_id', flat=True))
+            self._relationships = (approving, liking, liking & my_likes)
+        return self._relationships
+
+    def __contains__(self, author_id):
+        if self.viewer is None or author_id is None:
+            return False
+        # Authors always see their own notes.
+        if author_id == self.viewer.id:
+            return True
+
+        if author_id not in self._visibility_cache:
+            self._visibility_cache[author_id] = User.objects.filter(
+                id=author_id
+            ).values_list('note_visibility', flat=True).first()
+        visibility = self._visibility_cache[author_id]
+
+        if visibility == 'all':
+            return True
+        approving, liking, matching = self._load_relationships()
+        if visibility == 'approved':
+            return author_id in approving
+        if visibility == 'liked':
+            return author_id in liking
+        if visibility == 'matched':
+            return author_id in matching
+        # 'none' (and any unknown value) is hidden from everyone but the author
+        return False
 
 
 def _activity_visibility_filter(viewer):

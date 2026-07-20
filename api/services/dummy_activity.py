@@ -4,11 +4,12 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Exists, OuterRef
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
 from api.analytics import capture as posthog_capture
 from api.models import (
+    Controls,
     FeedActivity,
     Notification,
     Post,
@@ -69,15 +70,39 @@ def _stable_percent(*parts):
 
 
 def is_dummy_user(user):
-    return bool(user and (user.email or "").lower().endswith(f"@{DUMMY_EMAIL_DOMAIN}"))
+    """User.is_dummy is the source of truth. The email-domain check is kept only
+    as a fallback for accounts created before the flag existed and never
+    backfilled (e.g. a fixture loaded from an old dump).
+    """
+    if not user:
+        return False
+    if user.is_dummy:
+        return True
+    return (user.email or "").lower().endswith(f"@{DUMMY_EMAIL_DOMAIN}")
 
 
 def dummy_users_queryset():
+    """Simulated accounts, which the feed-activity simulator may post as."""
     return User.objects.filter(
-        email__iendswith=f"@{DUMMY_EMAIL_DOMAIN}",
+        Q(is_dummy=True) | Q(email__iendswith=f"@{DUMMY_EMAIL_DOMAIN}"),
         is_active=True,
         is_banned=False,
     )
+
+
+def non_dummy_users_queryset():
+    """Real signups. The required-question catch-up acts only on these, so the
+    simulator never fabricates answers on a simulated profile.
+
+    Note this is deliberately NOT the complement of dummy_users_queryset() over
+    all rows -- it applies the same is_active/is_banned gating, so a banned real
+    user is in neither set.
+    """
+    return User.objects.filter(
+        is_dummy=False,
+        is_active=True,
+        is_banned=False,
+    ).exclude(email__iendswith=f"@{DUMMY_EMAIL_DOMAIN}")
 
 
 def _local_day_bounds(now):
@@ -271,10 +296,20 @@ ACTIVITY_CREATORS = [
 
 
 @transaction.atomic
-def fill_due_dummy_feed_activity(now=None, daily_minimum=20):
+def fill_due_dummy_feed_activity(now=None, daily_minimum=20, ignore_controls=False):
     now = now or timezone.now()
     daily_minimum = max(1, int(daily_minimum))
     day_start, _ = _local_day_bounds(now)
+
+    if not ignore_controls and not Controls.get_current().auto_updater_enabled:
+        return {
+            "due": 0,
+            "existing": 0,
+            "created": 0,
+            "daily_minimum": daily_minimum,
+            "skipped": "disabled",
+        }
+
     due = due_dummy_feed_count(now=now, daily_minimum=daily_minimum)
     existing = count_existing_dummy_feed_items(now=now)
     missing = max(0, due - existing)
@@ -294,6 +329,7 @@ def fill_due_dummy_feed_activity(now=None, daily_minimum=20):
         "existing": existing,
         "created": len(created),
         "daily_minimum": daily_minimum,
+        "skipped": None,
     }
 
 
@@ -327,18 +363,22 @@ def _required_question_gaps(users, *, before=None):
 
 
 def _select_required_catchup_users(day_start, daily_count):
-    """Deterministically pick up to `daily_count` non-protected dummy users
-    for today's required-question catch-up. Users who had a required-but-
+    """Deterministically pick up to `daily_count` non-protected REAL (non-dummy)
+    users for today's required-question catch-up. Users who had a required-but-
     unanswered question as of the start of today are prioritized; the rest
     are used as harmless filler if not enough users have a gap. The ranking
     is a pure function of (day_start.date(), user.id), so it is identical
     across every invocation within the same day.
+
+    Dummy accounts are deliberately excluded: the simulator must not fabricate
+    required-question answers on seeded profiles. Until real signups exist this
+    returns an empty list, which is expected and not an error.
     """
     if daily_count <= 0:
         return []
 
     candidates = [
-        user for user in dummy_users_queryset().order_by("username", "id")
+        user for user in non_dummy_users_queryset().order_by("username", "id")
         if user.username.lower() not in PROTECTED_QUESTION_USERNAMES
     ]
     if not candidates:
@@ -438,10 +478,22 @@ def _answer_all_required_questions_for_user(user, *, day_start, now, dry_run=Fal
     return answered_ids
 
 
-def fill_due_dummy_required_question_answers(now=None, daily_count=5, dry_run=False):
+def fill_due_dummy_required_question_answers(now=None, daily_count=5, dry_run=False, ignore_controls=False):
     now = now or timezone.now()
     daily_count = max(0, int(daily_count))
     day_start, _ = _local_day_bounds(now)
+
+    if not ignore_controls:
+        controls = Controls.get_current()
+        if not controls.auto_updater_enabled or not controls.auto_answer_required_enabled:
+            return {
+                "daily_count": daily_count,
+                "selected_users": 0,
+                "users_touched": 0,
+                "questions_answered": 0,
+                "dry_run": dry_run,
+                "skipped": "disabled",
+            }
 
     selected_users = _select_required_catchup_users(day_start, daily_count)
 
@@ -467,6 +519,7 @@ def fill_due_dummy_required_question_answers(now=None, daily_count=5, dry_run=Fa
         "users_touched": users_touched,
         "questions_answered": questions_answered,
         "dry_run": dry_run,
+        "skipped": None,
     }
 
 

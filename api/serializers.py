@@ -145,6 +145,7 @@ class UserSerializer(serializers.ModelSerializer):
             'restriction_type', 'restriction_duration', 'restriction_reason', 'restriction_reason_detail', 'restriction_date',
             'require_answers_for_likes', 'share_answers',
             'feed_visibility_bio', 'feed_visibility_photo', 'feed_visibility_question',
+            'note_visibility',
             'importance_exclusion_values',
             'pictures', 'profile_prompts',
         ]
@@ -253,6 +254,22 @@ class LightQuestionSerializer(serializers.ModelSerializer):
 class UserAnswerSerializer(serializers.ModelSerializer):
     question = LightQuestionSerializer(read_only=True)
     user_id = serializers.UUIDField(source='user.id', read_only=True)
+    me_note = serializers.SerializerMethodField()
+
+    def get_me_note(self, obj):
+        """Return the note text only if the requesting viewer may see it.
+
+        Fails closed: when a caller has not wired 'note_visible_author_ids' into
+        the serializer context we return '' rather than leaking the note. An
+        empty string is also what an author-less note looks like, so a viewer
+        cannot tell a hidden note from an absent one.
+        """
+        if not (obj.me_note or ''):
+            return ''
+        allowed = self.context.get('note_visible_author_ids')
+        if allowed is None:
+            return ''
+        return obj.me_note if obj.user_id in allowed else ''
 
     def validate_excluded_answer_values(self, value):
         if value in (None, ''):
@@ -276,11 +293,12 @@ class UserAnswerSerializer(serializers.ModelSerializer):
         model = UserAnswer
         fields = [
             'id', 'user_id', 'question', 'me_answer', 'me_open_to_all',
-            'me_importance', 'me_share', 'looking_for_answer',
+            'me_importance', 'me_share', 'me_note', 'me_note_updated_at',
+            'looking_for_answer',
             'looking_for_open_to_all', 'looking_for_importance',
             'looking_for_share', 'excluded_answer_values', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'user_id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'user_id', 'me_note_updated_at', 'created_at', 'updated_at']
 
 
 class UserRequiredQuestionSerializer(serializers.ModelSerializer):
@@ -441,7 +459,11 @@ class ControlsSerializer(serializers.ModelSerializer):
     """Serializer for Controls model"""
     class Meta:
         model = Controls
-        fields = ['id', 'adjust', 'exponent', 'ota', 'created_at', 'updated_at']
+        fields = [
+            'id', 'adjust', 'exponent', 'ota',
+            'auto_updater_enabled', 'auto_answer_required_enabled',
+            'created_at', 'updated_at',
+        ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 

@@ -37,6 +37,16 @@ class User(AbstractUser):
         default=False,
         help_text="Grants access to internal dashboard features."
     )
+    is_dummy = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text=(
+            "Seeded/simulated account rather than a real signup. Authoritative "
+            "source of truth for dummy-ness -- do not infer it from the email "
+            "domain. The background activity simulator uses this to decide which "
+            "accounts it may act on."
+        ),
+    )
     ban_reason = models.TextField(blank=True)
     ban_date = models.DateTimeField(null=True, blank=True)
     restriction_type = models.CharField(max_length=20, null=True, blank=True, help_text="temporary or permanent")
@@ -64,6 +74,10 @@ class User(AbstractUser):
     feed_visibility_question = models.CharField(
         max_length=16, choices=FEED_VISIBILITY_CHOICES, default='all',
         help_text="Who can see this user's question-answered activities in the feed.",
+    )
+    note_visibility = models.CharField(
+        max_length=16, choices=FEED_VISIBILITY_CHOICES, default='all',
+        help_text="Who can see the free-text notes this user attaches to their Me answers.",
     )
     importance_exclusion_values = models.JSONField(
         default=list,
@@ -256,7 +270,14 @@ class UserAnswer(models.Model):
     me_open_to_all = models.BooleanField(default=False)
     me_importance = models.PositiveIntegerField(default=1, help_text="Importance level for this answer")
     me_share = models.BooleanField(default=True, help_text="Whether to share this answer")
-    
+    me_note = models.CharField(
+        max_length=280,
+        blank=True,
+        default='',
+        help_text="Free-text note the user attaches to their Me answer; visibility governed by User.note_visibility.",
+    )
+    me_note_updated_at = models.DateTimeField(null=True, blank=True)
+
     # Looking for answers (what I want in a partner)
     looking_for_answer = models.PositiveIntegerField(
         validators=[MinValueValidator(1), MaxValueValidator(6)],
@@ -784,6 +805,17 @@ class Controls(models.Model):
         help_text="OTA (Open To All) weight factor",
         validators=[MinValueValidator(0.0), MaxValueValidator(1.0)]
     )
+    auto_updater_enabled = models.BooleanField(
+        default=True,
+        help_text="Master switch for the background activity simulator. When off, "
+                  "the simulator does nothing at all."
+    )
+    auto_answer_required_enabled = models.BooleanField(
+        default=True,
+        help_text="Switch for the simulator's required-question catch-up. When off, "
+                  "feed activity is still simulated but no required questions are "
+                  "auto-answered."
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -802,7 +834,9 @@ class Controls(models.Model):
             defaults={
                 'adjust': 5.0,
                 'exponent': 2.0,
-                'ota': 0.5
+                'ota': 0.5,
+                'auto_updater_enabled': True,
+                'auto_answer_required_enabled': True,
             }
         )
         return controls
