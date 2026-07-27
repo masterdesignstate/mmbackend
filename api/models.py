@@ -24,7 +24,7 @@ class User(AbstractUser):
     from_location = models.CharField(max_length=100, null=True, blank=True, help_text="Where the user is originally from")
     live = models.CharField(max_length=100, null=True, blank=True, help_text="Where the user currently lives")
     tagline = models.CharField(max_length=40, blank=True, help_text="Short tagline")
-    bio = models.TextField(max_length=500, blank=True)
+    bio = models.TextField(max_length=280, blank=True)
     last_active = models.DateTimeField(default=timezone.now)
     is_banned = models.BooleanField(default=False)
     email_verified = models.BooleanField(default=False)
@@ -271,7 +271,7 @@ class UserAnswer(models.Model):
     me_importance = models.PositiveIntegerField(default=1, help_text="Importance level for this answer")
     me_share = models.BooleanField(default=True, help_text="Whether to share this answer")
     me_note = models.CharField(
-        max_length=280,
+        max_length=160,
         blank=True,
         default='',
         help_text="Free-text note the user attaches to their Me answer; visibility governed by User.note_visibility.",
@@ -479,9 +479,11 @@ class Post(models.Model):
         ('matched', 'Matches'),
     ]
 
+    MAX_BODY_LENGTH = 160
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     author = models.ForeignKey(User, on_delete=models.CASCADE, related_name='posts')
-    body = models.TextField(max_length=2000)
+    body = models.TextField(max_length=MAX_BODY_LENGTH)
     visibility = models.CharField(max_length=16, choices=VISIBILITY_CHOICES, default='all')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -525,6 +527,8 @@ class PostRevision(models.Model):
     """Snapshot of a post body BEFORE each edit; newest first."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='revisions')
+    # Deliberately wider than Post.MAX_BODY_LENGTH: revisions hold bodies written
+    # under older, longer limits and must stay readable.
     body = models.TextField(max_length=2000)
     edited_at = models.DateTimeField(auto_now_add=True)
 
@@ -949,6 +953,10 @@ class Notification(models.Model):
         ('note', 'Note'),
         ('prompt_poll', 'Prompt Poll'),
     ]
+
+    # Cap on user-authored notes sent with a like. Admin broadcasts use a
+    # separate path and are not bound by it.
+    MAX_USER_NOTE_LENGTH = 200
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications_received')

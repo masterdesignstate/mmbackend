@@ -47,7 +47,7 @@ def make_email_verification_code():
 def build_verification_email_bodies(user, verification_code, expiry_minutes):
     verification_url = make_email_verification_url(user)
     text_body = (
-        "Welcome to Matchmatical.\n\n"
+        "Welcome to CompatibleFirst.\n\n"
         f"Your verification code is: {verification_code}\n\n"
         f"Or verify your email here: {verification_url}\n\n"
         f"This code expires in {expiry_minutes} minutes.\n\n"
@@ -63,7 +63,7 @@ def build_verification_email_bodies(user, verification_code, expiry_minutes):
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#ffffff;border:1px solid #e7e2f2;border-radius:20px;overflow:hidden;box-shadow:0 16px 40px rgba(103,45,183,0.12);">
             <tr>
               <td style="padding:28px 32px 18px 32px;text-align:center;background:#ffffff;">
-                <div style="font-size:14px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:#672DB7;">Matchmatical</div>
+                <div style="font-size:14px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:#672DB7;">CompatibleFirst</div>
                 <h1 style="margin:12px 0 8px 0;font-size:28px;line-height:1.2;font-weight:800;color:#111827;">Verify your email</h1>
                 <p style="margin:0 auto;max-width:420px;font-size:15px;line-height:1.6;color:#6b7280;">Enter this code in the app to finish setting up your account.</p>
               </td>
@@ -166,7 +166,7 @@ def send_verification_email(user):
         json={
             "From": from_email,
             "To": user.email,
-            "Subject": "Verify your Matchmatical email",
+            "Subject": "Verify your CompatibleFirst email",
             "TextBody": text_body,
             "HtmlBody": html_body,
             "MessageStream": getattr(settings, "POSTMARK_MESSAGE_STREAM", "outbound"),

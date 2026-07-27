@@ -20,10 +20,10 @@ class EmailVerificationTests(TestCase):
 
         text_body, html_body = build_verification_email_bodies(user, "123456", 15)
 
-        self.assertIn("Welcome to Matchmatical", text_body)
+        self.assertIn("Welcome to CompatibleFirst", text_body)
         self.assertIn("123456", text_body)
         self.assertIn("/auth/verify-email?", text_body)
-        self.assertIn("Matchmatical", html_body)
+        self.assertIn("CompatibleFirst", html_body)
         self.assertIn("Verify your email", html_body)
         self.assertIn("123456", html_body)
         self.assertNotIn("<img", html_body)

@@ -2808,7 +2808,7 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
             else:
                 UserRequiredQuestion.objects.filter(user=user, question=question).delete()
 
-    ME_NOTE_MAX_LENGTH = 280
+    ME_NOTE_MAX_LENGTH = 160
 
     @staticmethod
     def _clean_me_note(raw_value):
@@ -3401,6 +3401,13 @@ class UserResultViewSet(viewsets.ModelViewSet):
         if not all([sender_id, recipient_id, note]):
             return Response(
                 {'error': 'sender_id, recipient_id, and note are required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        note = str(note).strip()
+        if len(note) > Notification.MAX_USER_NOTE_LENGTH:
+            return Response(
+                {'error': f'Notes must be {Notification.MAX_USER_NOTE_LENGTH} characters or fewer.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -4542,8 +4549,8 @@ class PostViewSet(viewsets.ModelViewSet):
             visibility = 'all'
         if not body and not image_urls:
             return Response({'error': 'Post must have a body or at least one image.'}, status=400)
-        if len(body) > 2000:
-            return Response({'error': 'Body too long (max 2000 chars).'}, status=400)
+        if len(body) > Post.MAX_BODY_LENGTH:
+            return Response({'error': f'Body too long (max {Post.MAX_BODY_LENGTH} chars).'}, status=400)
         from api.utils.word_filter import validate_text_fields
         has_restricted, found_words = validate_text_fields(feed_post=body)
         if has_restricted:
@@ -4577,8 +4584,8 @@ class PostViewSet(viewsets.ModelViewSet):
 
         if new_body is not None:
             new_body = new_body.strip()
-            if len(new_body) > 2000:
-                return Response({'error': 'Body too long (max 2000 chars).'}, status=400)
+            if len(new_body) > Post.MAX_BODY_LENGTH:
+                return Response({'error': f'Body too long (max {Post.MAX_BODY_LENGTH} chars).'}, status=400)
             from api.utils.word_filter import validate_text_fields
             has_restricted, found_words = validate_text_fields(feed_post=new_body)
             if has_restricted:

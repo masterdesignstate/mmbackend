@@ -49,7 +49,7 @@ class AnswerNoteTestBase(TestCase):
 
 
 class MeNoteWriteTests(AnswerNoteTestBase):
-    def test_create_rejects_note_over_280_chars(self):
+    def test_create_rejects_note_over_160_chars(self):
         response = self.client.post(
             '/api/answers/',
             {
@@ -57,15 +57,15 @@ class MeNoteWriteTests(AnswerNoteTestBase):
                 'question_id': str(self.question.id),
                 'me_answer': 3,
                 'looking_for_answer': 3,
-                'me_note': 'x' * 281,
+                'me_note': 'x' * 161,
             },
             format='json',
         )
         self.assertEqual(response.status_code, 400)
-        self.assertIn('280', response.data['error'])
+        self.assertIn('160', response.data['error'])
         self.assertFalse(UserAnswer.objects.filter(user=self.author).exists())
 
-    def test_create_accepts_note_at_exactly_280_chars(self):
+    def test_create_accepts_note_at_exactly_160_chars(self):
         response = self.client.post(
             '/api/answers/',
             {
@@ -73,18 +73,18 @@ class MeNoteWriteTests(AnswerNoteTestBase):
                 'question_id': str(self.question.id),
                 'me_answer': 3,
                 'looking_for_answer': 3,
-                'me_note': 'x' * 280,
+                'me_note': 'x' * 160,
             },
             format='json',
         )
         self.assertIn(response.status_code, (200, 201))
-        self.assertEqual(UserAnswer.objects.get(user=self.author).me_note, 'x' * 280)
+        self.assertEqual(UserAnswer.objects.get(user=self.author).me_note, 'x' * 160)
 
-    def test_update_rejects_note_over_280_chars(self):
+    def test_update_rejects_note_over_160_chars(self):
         answer = self.make_answer(note='original')
         response = self.client.patch(
             f'/api/answers/{answer.id}/',
-            {'me_note': 'x' * 281},
+            {'me_note': 'x' * 161},
             format='json',
         )
         self.assertEqual(response.status_code, 400)
