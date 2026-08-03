@@ -3,7 +3,7 @@ from .models import (
     User, UserRestrictionHistory, Tag, Question, UserAnswer, UserRequiredQuestion, Compatibility,
     UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, QuestionAnswer, Controls, Notification, Conversation,
     Post, PostImage, PostHashtag, PostRevision, PostReaction, PostComment, FeedActivity,
-    PromptTemplate, UserProfilePrompt, PromptPollVote,
+    PromptTemplate, UserProfilePrompt, PromptPollVote, RestrictedWord,
 )
 from .utils.admin_utils import profile_answer_key
 
@@ -12,6 +12,25 @@ class TagSerializer(serializers.ModelSerializer):
     class Meta:
         model = Tag
         fields = ['id', 'name']
+
+
+class RestrictedWordSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RestrictedWord
+        fields = ['id', 'word', 'severity', 'is_active', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_word(self, value):
+        word = value.strip().lower()
+        if not word:
+            raise serializers.ValidationError('Word cannot be blank.')
+
+        matches = RestrictedWord.objects.filter(word__iexact=word)
+        if self.instance:
+            matches = matches.exclude(pk=self.instance.pk)
+        if matches.exists():
+            raise serializers.ValidationError('This restricted word already exists.')
+        return word
 
 
 class UserPictureSerializer(serializers.ModelSerializer):

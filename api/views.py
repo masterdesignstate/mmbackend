@@ -17,7 +17,7 @@ from .models import (
     UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, Controls,
     Notification, Conversation, UserPicture,
     Post, PostImage, PostHashtag, PostRevision, PostReaction, PostComment, FeedActivity,
-    PromptTemplate, UserProfilePrompt, PromptPollVote,
+    PromptTemplate, UserProfilePrompt, PromptPollVote, RestrictedWord,
 )
 from .services.compatibility_service import CompatibilityService
 from .services.dummy_activity import create_user_result_with_notifications, simulate_dummy_reciprocation
@@ -36,9 +36,11 @@ from .serializers import (
     DetailedUserSerializer, DetailedQuestionSerializer, UserTagSerializer,
     SimpleUserSerializer, ControlsSerializer, NotificationSerializer, ConversationSerializer,
     PromptTemplateSerializer, UserProfilePromptSerializer, PromptPollVoteSerializer,
+    RestrictedWordSerializer,
 )
 from .permissions import IsDashboardAdmin
 from .utils.admin_utils import profile_answer_key
+from .utils.word_filter import clear_restricted_words_cache
 
 
 DEFAULT_EXCLUDED_ANSWER_VALUES = {1, 2, 3, 4, 5}
@@ -448,17 +450,9 @@ class UserViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def me(self, request):
         """Get current user's profile"""
-        print(f"🔍 /users/me/ called")
-        print(f"   User authenticated: {request.user.is_authenticated}")
-        print(f"   User: {request.user}")
-        print(f"   Session key: {request.session.session_key}")
-        print(f"   Session data: {dict(request.session)}")
-        
         if not request.user.is_authenticated:
-            print(f"❌ User not authenticated")
             return Response({'error': 'Authentication required'}, status=401)
-        
-        print(f"✅ User authenticated: {request.user.id}")
+
         # Built directly rather than via get_serializer(), so the note context must be
         # passed explicitly or the user loses their own notes on their own profile.
         serializer = DetailedUserSerializer(
@@ -2126,6 +2120,77 @@ class TagViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Tag.objects.all()
 
 
+class RestrictedWordViewSet(viewsets.ModelViewSet):
+    """Dashboard CRUD for the words used by the content filter."""
+
+    serializer_class = RestrictedWordSerializer
+    permission_classes = [permissions.AllowAny]
+    queryset = RestrictedWord.objects.all()
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['word']
+    ordering_fields = ['word', 'severity', 'is_active', 'created_at', 'updated_at']
+    ordering = ['word']
+
+    def _get_admin_user(self, request):
+        user_id = request.query_params.get('user_id')
+        if not user_id:
+            try:
+                user_id = (request.data or {}).get('user_id')
+            except Exception:
+                user_id = None
+        if not user_id:
+            return None
+        return User.objects.filter(
+            id=user_id,
+            is_active=True,
+        ).filter(Q(is_admin=True) | Q(is_staff=True)).first()
+
+    def _require_admin(self, request):
+        if not self._get_admin_user(request):
+            return Response({'error': 'Admin only'}, status=status.HTTP_403_FORBIDDEN)
+        return None
+
+    def list(self, request, *args, **kwargs):
+        denied = self._require_admin(request)
+        return denied or super().list(request, *args, **kwargs)
+
+    def retrieve(self, request, *args, **kwargs):
+        denied = self._require_admin(request)
+        return denied or super().retrieve(request, *args, **kwargs)
+
+    def create(self, request, *args, **kwargs):
+        denied = self._require_admin(request)
+        if denied:
+            return denied
+        response = super().create(request, *args, **kwargs)
+        clear_restricted_words_cache()
+        return response
+
+    def update(self, request, *args, **kwargs):
+        denied = self._require_admin(request)
+        if denied:
+            return denied
+        response = super().update(request, *args, **kwargs)
+        clear_restricted_words_cache()
+        return response
+
+    def partial_update(self, request, *args, **kwargs):
+        denied = self._require_admin(request)
+        if denied:
+            return denied
+        response = super().partial_update(request, *args, **kwargs)
+        clear_restricted_words_cache()
+        return response
+
+    def destroy(self, request, *args, **kwargs):
+        denied = self._require_admin(request)
+        if denied:
+            return denied
+        response = super().destroy(request, *args, **kwargs)
+        clear_restricted_words_cache()
+        return response
+
+
 class QuestionViewSet(viewsets.ModelViewSet):
     serializer_class = QuestionSerializer
     permission_classes = [permissions.AllowAny]  # Changed for testing
@@ -2548,7 +2613,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
         from django.core.cache import cache
         from .models import QuestionNumberCounter
         try:
-            question = self.get_object()
+            question = Question.objects.get(pk=pk)
             
             # Assign question_number atomically if not already assigned
             if question.question_number is None:
@@ -2564,6 +2629,8 @@ class QuestionViewSet(viewsets.ModelViewSet):
 
             serializer = self.get_serializer(question)
             return Response(serializer.data)
+        except Question.DoesNotExist:
+            return Response({'error': 'Question not found'}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             logger.error(f"Error approving question: {e}")
             return Response({
@@ -2575,7 +2642,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
         """Reject a question (admin only)"""
         from django.core.cache import cache
         try:
-            question = self.get_object()
+            question = Question.objects.get(pk=pk)
             question.is_approved = False
             # Set question_number to NULL when unapproving
             question.question_number = None
@@ -2587,6 +2654,8 @@ class QuestionViewSet(viewsets.ModelViewSet):
 
             serializer = self.get_serializer(question)
             return Response(serializer.data)
+        except Question.DoesNotExist:
+            return Response({'error': 'Question not found'}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             logger.error(f"Error rejecting question: {e}")
             return Response({
@@ -2599,7 +2668,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
         from django.core.cache import cache
         from .models import QuestionNumberCounter
         try:
-            question = self.get_object()
+            question = Question.objects.get(pk=pk)
             old_approved = question.is_approved
             new_approved = not old_approved
             
@@ -2619,6 +2688,8 @@ class QuestionViewSet(viewsets.ModelViewSet):
 
             serializer = self.get_serializer(question)
             return Response(serializer.data)
+        except Question.DoesNotExist:
+            return Response({'error': 'Question not found'}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             logger.error(f"Error toggling approval: {e}", exc_info=True)
             return Response({
@@ -3195,9 +3266,9 @@ class UserRequiredQuestionViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user_id = self.request.query_params.get('user')
         if user_id:
-            return UserRequiredQuestion.objects.filter(user_id=user_id).select_related('question', 'user')
+            return UserRequiredQuestion.objects.filter(user_id=user_id).select_related('question', 'user').order_by('id')
         if self.request.user.is_authenticated:
-            return UserRequiredQuestion.objects.filter(user=self.request.user).select_related('question', 'user')
+            return UserRequiredQuestion.objects.filter(user=self.request.user).select_related('question', 'user').order_by('id')
         return UserRequiredQuestion.objects.none()
 
     def create(self, request, *args, **kwargs):

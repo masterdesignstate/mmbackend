@@ -207,8 +207,14 @@ EMAIL_VERIFICATION_CODE_MAX_AGE_SECONDS = config(
     default=60 * 15,
     cast=int,
 )
+PASSWORD_RESET_TOKEN_MAX_AGE = config(
+    'PASSWORD_RESET_TOKEN_MAX_AGE',
+    default=60 * 60,
+    cast=int,
+)
 FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:3000')
-DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='hello@matchmatical.com')
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='admin@compatiblefirst.com')
+POSTMARK_FROM_EMAIL = config('POSTMARK_FROM_EMAIL', default='admin@compatiblefirst.com')
 POSTMARK_SERVER_TOKEN = config('POSTMARK_SERVER_TOKEN', default='')
 POSTMARK_MESSAGE_STREAM = config('POSTMARK_MESSAGE_STREAM', default='outbound')
 

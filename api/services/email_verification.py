@@ -142,7 +142,7 @@ def verify_email_code(user, code):
 
 def send_verification_email(user):
     verification_code = set_email_verification_code(user)
-    from_email = settings.DEFAULT_FROM_EMAIL
+    from_email = settings.POSTMARK_FROM_EMAIL
     postmark_token = getattr(settings, "POSTMARK_SERVER_TOKEN", "")
     expiry_minutes = max(settings.EMAIL_VERIFICATION_CODE_MAX_AGE_SECONDS // 60, 1)
     text_body, html_body = build_verification_email_bodies(user, verification_code, expiry_minutes)

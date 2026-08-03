@@ -6,6 +6,10 @@ from django.views.decorators.http import require_http_methods
 from django.contrib.auth import authenticate, login
 from django.db import transaction
 from django.contrib.auth.hashers import make_password
+from django.contrib.auth import password_validation
+from django.core.exceptions import ValidationError
+from django.utils.encoding import force_str
+from django.utils.http import urlsafe_base64_decode
 from django.utils import timezone
 from django.conf import settings
 from django.core import signing
@@ -20,8 +24,70 @@ from .services.email_verification import (
     verify_email_code,
 )
 from .utils.admin_utils import ensure_dashboard_admin
+from .services.password_reset import send_password_reset_email, token_generator
 
 logger = logging.getLogger(__name__)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def request_password_reset(request):
+    """Send a reset link without revealing whether an account exists."""
+    generic_response = {
+        'success': True,
+        'message': 'If an account exists for that email, a reset link has been sent.',
+    }
+    try:
+        data = json.loads(request.body)
+        email = (data.get('email') or '').strip().lower()
+        if not email:
+            return JsonResponse({'error': 'Email is required'}, status=400)
+
+        user = User.objects.filter(email__iexact=email, is_active=True).first()
+        if user:
+            try:
+                delivery = send_password_reset_email(user)
+                if settings.DEBUG and delivery.get('delivery') == 'development_fallback':
+                    generic_response['uid'] = delivery['uid']
+                    generic_response['token'] = delivery['token']
+            except Exception:
+                logger.exception('Failed to send password reset email for %s', email)
+        return JsonResponse(generic_response, status=200)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON format'}, status=400)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def confirm_password_reset(request):
+    """Validate a signed one-time token and replace the user's password."""
+    try:
+        data = json.loads(request.body)
+        uid = data.get('uid')
+        token = data.get('token')
+        new_password = data.get('new_password')
+        if not uid or not token or not new_password:
+            return JsonResponse({'error': 'Reset link and new password are required'}, status=400)
+
+        try:
+            user_id = force_str(urlsafe_base64_decode(uid))
+            user = User.objects.get(pk=user_id, is_active=True)
+        except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+            return JsonResponse({'error': 'This reset link is invalid or has expired'}, status=400)
+
+        if not token_generator.check_token(user, token):
+            return JsonResponse({'error': 'This reset link is invalid or has expired'}, status=400)
+
+        try:
+            password_validation.validate_password(new_password, user=user)
+        except ValidationError as validation_error:
+            return JsonResponse({'error': ' '.join(validation_error.messages)}, status=400)
+
+        user.set_password(new_password)
+        user.save(update_fields=['password'])
+        return JsonResponse({'success': True, 'message': 'Your password has been reset.'}, status=200)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON format'}, status=400)
 
 
 @csrf_exempt
@@ -42,8 +108,6 @@ def user_signup(request):
     try:
         print("🚀 === USER SIGNUP ENDPOINT CALLED ===")
         print(f"📥 Request method: {request.method}")
-        print(f"📥 Request headers: {dict(request.headers)}")
-        print(f"📥 Request body: {request.body}")
         
         # Parse request data
         data = json.loads(request.body)
@@ -52,14 +116,12 @@ def user_signup(request):
         alpha_code = (data.get('alpha_code') or data.get('invite_code') or '').strip()
 
         print(f"📝 USER SIGNUP REQUEST for email: {email}")
-        print(f"🔑 Password length: {len(password) if password else 0}")
         print(f"🎟️  Invite code provided: {bool(alpha_code)}")
 
         # Validate required fields
         if not email or not password:
             print("❌ Missing required fields")
             print(f"   Email present: {bool(email)}")
-            print(f"   Password present: {bool(password)}")
             return JsonResponse({
                 'error': 'Email and password are required'
             }, status=400)
@@ -230,15 +292,12 @@ def user_personal_details(request):
     try:
         print("🚀 === PERSONAL DETAILS ENDPOINT CALLED ===")
         print(f"📥 Request method: {request.method}")
-        print(f"📥 Request headers: {dict(request.headers)}")
-        print(f"📥 Request body: {request.body}")
         
         # Parse request data
         data = json.loads(request.body)
         user_id = data.get('user_id')
         
         print(f"📝 PERSONAL DETAILS REQUEST for user: {user_id}")
-        print(f"📊 Parsed data: {data}")
         
         # Get the user first so we can determine whether identity fields are locked
         try:
@@ -462,129 +521,36 @@ def user_login(request):
     - message: Success message
     """
     try:
-        print("🚀 === USER LOGIN ENDPOINT CALLED ===")
-        print(f"📥 Request method: {request.method}")
-        print(f"📥 Request headers: {dict(request.headers)}")
-        print(f"📥 Request body: {request.body}")
-        
-        # Parse request data
         data = json.loads(request.body)
         email = (data.get('email') or '').strip().lower()
         password = data.get('password')
-        
-        print(f"🔐 USER LOGIN REQUEST for email: {email}")
-        print(f"🔑 Password length: {len(password) if password else 0}")
-        print(f"📊 Parsed data: {data}")
-        
-        # Validate required fields
+
         if not email or not password:
-            print("❌ Missing required fields")
-            print(f"   Email present: {bool(email)}")
-            print(f"   Password present: {bool(password)}")
-            return JsonResponse({
-                'error': 'Email and password are required'
-            }, status=400)
-        
-        print(f"✅ Validation passed, attempting authentication")
-        
-        # Check if user exists first
-        try:
-            user_exists = User.objects.filter(email=email).first()
-            if user_exists:
-                print(f"✅ User found in database: {user_exists.id} - {user_exists.email}")
-                print(f"   Username: {user_exists.username}")
-                print(f"   Is Active: {user_exists.is_active}")
-                print(f"   Date Joined: {user_exists.date_joined}")
-            else:
-                print(f"❌ No user found with email: {email}")
-        except Exception as e:
-            print(f"⚠️ Error checking user existence: {str(e)}")
-        
-        # Authenticate user - try both email and username
-        print(f"🔐 Attempting authentication with Django's authenticate()")
-        
-        # First try with email as username (how we created the user)
-        user = authenticate(username=email, password=password)
-        
+            return JsonResponse({'error': 'Email and password are required'}, status=400)
+
+        candidate = User.objects.filter(email__iexact=email).first()
+        if candidate and not candidate.is_active:
+            return JsonResponse({'error': 'User account is deactivated'}, status=403)
+
+        user = authenticate(
+            username=candidate.username if candidate else email,
+            password=password,
+        )
         if user is None:
-            print(f"⚠️ Authentication failed with email as username, trying alternative methods...")
-            
-            # Try to find the user first to debug
-            try:
-                found_user = User.objects.filter(email__iexact=email).first()
-                if found_user:
-                    print(f"🔍 Found user in database:")
-                    print(f"   ID: {found_user.id}")
-                    print(f"   Email: '{found_user.email}'")
-                    print(f"   Username: '{found_user.username}'")
-                    print(f"   Is Active: {found_user.is_active}")
-                    print(f"   Has Password: {bool(found_user.password)}")
-                    
-                    # Try authenticating with the actual username from database
-                    user = authenticate(username=found_user.username, password=password)
-                    if user:
-                        print(f"✅ Authentication successful with actual username!")
-                    else:
-                        print(f"❌ Still failed with actual username")
-                        
-                        # Debug: Check if password hash matches
-                        from django.contrib.auth.hashers import check_password
-                        password_matches = check_password(password, found_user.password)
-                        print(f"🔐 Password check result: {password_matches}")
-                        print(f"   Input password: '{password}'")
-                        print(f"   Stored hash: {found_user.password[:20]}...")
-                else:
-                    print(f"❌ No user found with email: {email}")
-            except Exception as e:
-                print(f"⚠️ Error during debug lookup: {str(e)}")
-        
-        if user is None:
-            print(f"❌ Authentication failed - invalid credentials")
-            print(f"   This could mean:")
-            print(f"   - Email doesn't exist")
-            print(f"   - Password is wrong")
-            print(f"   - Username field mismatch")
-            print(f"   - Password hash issue")
-            return JsonResponse({
-                'error': 'Invalid email or password'
-            }, status=401)
-        
-        print(f"✅ Authentication successful!")
-        print(f"   Authenticated user: {user.id} - {user.email}")
+            logger.warning('Rejected login attempt')
+            return JsonResponse({'error': 'Invalid email or password'}, status=401)
+
         is_admin_user = ensure_dashboard_admin(user)
-        if is_admin_user:
-            print(f"🛡️ Admin access granted for: {user.email}")
-
-        if not user.is_active:
-            print(f"❌ User account is deactivated")
-            return JsonResponse({
-                'error': 'User account is deactivated'
-            }, status=403)
-
         if settings.EMAIL_VERIFICATION_REQUIRED and not is_admin_user and not user.email_verified:
-            print(f"❌ User email is not verified: {user.email}")
             try:
                 send_verification_email(user)
-            except Exception as email_error:
-                logger.error("Failed to resend verification email to %s: %s", user.email, email_error)
+            except Exception:
+                logger.exception('Failed to resend verification email for user_id=%s', user.id)
             apply_email_verification_restriction(user)
-        
-        print(f"✅ User account is active")
-        
-        # Get user data for response
-        full_name = f"{user.first_name} {user.last_name}".strip()
-        print(f"📝 User details:")
-        print(f"   ID: {user.id}")
-        print(f"   Username: {user.username}")
-        print(f"   Email: {user.email}")
-        print(f"   Full Name: '{full_name}'")
-        print(f"   Age: {user.age}")
-        print(f"   Live: {user.live}")
-        print(f"   Admin: {'Yes' if is_admin_user else 'No'}")
 
-        # Log the user in to create a session
+        full_name = f"{user.first_name} {user.last_name}".strip()
         login(request, user)
-        print(f"🔑 User logged in successfully with session")
+        logger.info('Login succeeded for user_id=%s', user.id)
 
         response_data = {
             'success': True,
@@ -608,23 +574,13 @@ def user_login(request):
             }
         }
 
-        print(f"📤 Sending successful login response: {response_data}")
         return JsonResponse(response_data, status=200)
-        
-    except json.JSONDecodeError as e:
-        print(f"❌ JSON decode error: {str(e)}")
-        print(f"   Raw request body: {request.body}")
-        return JsonResponse({
-            'error': 'Invalid JSON format'
-        }, status=400)
-    except Exception as e:
-        print(f"❌ Unexpected error in user_login: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        logger.error(f"Error in user_login: {str(e)}")
-        return JsonResponse({
-            'error': str(e)
-        }, status=500)
+
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON format'}, status=400)
+    except Exception:
+        logger.exception('Unexpected login error')
+        return JsonResponse({'error': 'Unable to log in right now'}, status=500)
 
 
 @csrf_exempt
@@ -744,11 +700,8 @@ def check_user_exists(request):
     try:
         print("🚀 === CHECK USER EXISTS ENDPOINT CALLED ===")
         print(f"📥 Request method: {request.method}")
-        print(f"📥 Request headers: {dict(request.headers)}")
-        print(f"📥 Query parameters: {dict(request.GET)}")
         
         email = request.GET.get('email')
-        print(f"📧 Checking if user exists with email: {email}")
         
         if not email:
             print("❌ No email parameter provided")
@@ -797,8 +750,6 @@ def check_onboarding_status(request):
     try:
         print("🔍 === CHECK ONBOARDING STATUS ENDPOINT CALLED ===")
         print(f"📥 Request method: {request.method}")
-        print(f"📥 Request headers: {dict(request.headers)}")
-        print(f"📥 Request body: {request.body}")
 
         data = json.loads(request.body)
         email = data.get('email')
@@ -921,15 +872,12 @@ def update_profile_photo(request):
     try:
         print("📸 === UPDATE PROFILE PHOTO ENDPOINT CALLED ===")
         print(f"📥 Request method: {request.method}")
-        print(f"📥 Request headers: {dict(request.headers)}")
-        print(f"📥 Request body: {request.body}")
 
         data = json.loads(request.body)
         user_id = data.get('user_id')
         profile_photo_url = data.get('profile_photo_url')
         
         print(f"📸 UPDATE PROFILE PHOTO REQUEST for user: {user_id}")
-        print(f"📸 Photo URL: {profile_photo_url}")
 
         if not user_id or not profile_photo_url:
             print("❌ Missing required fields")
@@ -1004,7 +952,6 @@ def upload_photo(request):
     try:
         print("📸 === UPLOAD PHOTO ENDPOINT CALLED ===")
         print(f"📥 Request method: {request.method}")
-        print(f"📥 Request headers: {dict(request.headers)}")
         print(f"📥 Request body length: {len(request.body)}")
 
         data = json.loads(request.body)

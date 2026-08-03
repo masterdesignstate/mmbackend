@@ -1,7 +1,9 @@
+from unittest.mock import patch
+
 from django.test import TestCase, override_settings
 
 from .models import User, UserRestrictionHistory
-from .services.email_verification import build_verification_email_bodies
+from .services.email_verification import build_verification_email_bodies, send_verification_email
 
 
 @override_settings(
@@ -29,6 +31,26 @@ class EmailVerificationTests(TestCase):
         self.assertNotIn("<img", html_body)
         self.assertIn("background:#672DB7", html_body)
         self.assertIn("/auth/verify-email?", html_body)
+
+    @override_settings(
+        POSTMARK_SERVER_TOKEN="postmark-test-token",
+        POSTMARK_FROM_EMAIL="admin@compatiblefirst.com",
+    )
+    @patch("api.services.email_verification.requests.post")
+    def test_postmark_verification_email_uses_compatiblefirst_sender(self, post):
+        user = User.objects.create_user(
+            username="sender@example.com",
+            email="sender@example.com",
+            password="password123",
+        )
+        post.return_value.json.return_value = {
+            "MessageID": "message-id",
+            "SubmittedAt": "2026-08-02T00:00:00Z",
+        }
+
+        send_verification_email(user)
+
+        self.assertEqual(post.call_args.kwargs["json"]["From"], "admin@compatiblefirst.com")
 
     def test_signup_requires_email_verification_before_login(self):
         signup = self.client.post(

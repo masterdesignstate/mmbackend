@@ -15,6 +15,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from api.models import Question, User, UserAnswer, UserPicture, UserRequiredQuestion
+from api.tagline_rewrites import rewrite_tagline
 
 
 DEFAULT_CSV = "/Users/dimi/Downloads/Notes_Dimi - Dummy.csv"
@@ -1311,7 +1312,7 @@ def build_import_rows(raw_rows, men_photos, women_photos, seed):
                 first_name=row["first_name"],
                 last_name=row["last_name"],
                 username=row["username"],
-                tagline=row["tagline"][:40],
+                tagline=rewrite_tagline(row["tagline"]),
                 date_of_birth=row["date_of_birth"],
                 live=row["live"],
                 bio=row["bio"],

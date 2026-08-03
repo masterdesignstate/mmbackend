@@ -6,10 +6,12 @@ from .views import (
     PictureModerationViewSet, UserReportViewSet, UserTagViewSet, StatsViewSet, ControlsViewSet, NotificationViewSet, ConversationViewSet,
     PostViewSet, PostCommentViewSet, FeedView,
     PromptTemplateViewSet, UserProfilePromptViewSet,
+    RestrictedWordViewSet,
 )
 from .function_views import (
     user_signup, user_personal_details, user_login, check_user_exists, check_onboarding_status, update_profile_photo, upload_photo, test_endpoint, delete_question,
-    impostor_login, impostor_exit, verify_email, resend_verification_email
+    impostor_login, impostor_exit, verify_email, resend_verification_email,
+    request_password_reset, confirm_password_reset,
 )
 
 router = DefaultRouter()
@@ -33,6 +35,7 @@ router.register(r'comments', PostCommentViewSet, basename='comment')
 router.register(r'feed', FeedView, basename='feed')
 router.register(r'prompt-templates', PromptTemplateViewSet, basename='prompt-template')
 router.register(r'profile-prompts', UserProfilePromptViewSet, basename='profile-prompt')
+router.register(r'restricted-words', RestrictedWordViewSet, basename='restricted-word')
 
 urlpatterns = [
     path('', include(router.urls)),
@@ -43,6 +46,8 @@ urlpatterns = [
     path('auth/login/', user_login, name='user_login'),
     path('auth/verify-email/', verify_email, name='verify_email'),
     path('auth/resend-verification-email/', resend_verification_email, name='resend_verification_email'),
+    path('auth/password-reset/request/', request_password_reset, name='request_password_reset'),
+    path('auth/password-reset/confirm/', confirm_password_reset, name='confirm_password_reset'),
     path('auth/check-user/', check_user_exists, name='check_user_exists'),
     path('auth/onboarding-status/', check_onboarding_status, name='check_onboarding_status'),
     path('auth/update-profile-photo/', update_profile_photo, name='update_profile_photo'),
