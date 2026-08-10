@@ -401,6 +401,37 @@ def _remove_user_restriction(user, description=''):
     _clear_user_restriction(user)
 
 
+def _resolve_acting_admin(request):
+    """Resolve the admin performing a privileged dashboard action, or None.
+
+    The dashboard never establishes a Django session, so it identifies itself with an
+    explicit user_id (query param or body) — the same convention
+    PictureModerationViewSet._get_admin_user already uses. Accepts either the custom
+    is_admin flag or Django's is_staff, since some real accounts carry only one.
+    Fails closed: any missing/unknown/non-admin id returns None.
+    """
+    if request.user.is_authenticated and (
+        getattr(request.user, 'is_admin', False) or request.user.is_staff
+    ):
+        return request.user
+
+    user_id = request.query_params.get('user_id') if hasattr(request, 'query_params') else None
+    if not user_id:
+        try:
+            user_id = (request.data or {}).get('user_id')
+        except Exception:
+            user_id = None
+    if not user_id:
+        return None
+
+    try:
+        user = User.objects.get(id=user_id)
+    except Exception:
+        return None
+
+    return user if (user.is_admin or user.is_staff) else None
+
+
 class UserViewSet(viewsets.ModelViewSet):
     serializer_class = UserSerializer
     permission_classes = [permissions.AllowAny]  # Changed for testing
@@ -413,8 +444,9 @@ class UserViewSet(viewsets.ModelViewSet):
         _expire_temporary_restrictions()
 
         # For retrieve (single user lookup), include banned users so the frontend
-        # can detect the ban and show the appropriate overlay
-        if self.action in ['retrieve', 'restrict', 'remove_restriction']:
+        # can detect the ban and show the appropriate overlay. `destroy` needs the
+        # unfiltered set too, or banned users would be undeletable.
+        if self.action in ['retrieve', 'restrict', 'remove_restriction', 'destroy']:
             return User.objects.prefetch_related('answers__question').all()
 
         # For list/other actions, exclude banned users and current user
@@ -446,6 +478,53 @@ class UserViewSet(viewsets.ModelViewSet):
         _expire_temporary_restriction(instance)
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
+
+    def destroy(self, request, *args, **kwargs):
+        """Permanently delete a user and everything that cascades from them.
+
+        Admin only. Note that permission_classes on this ViewSet is AllowAny, so
+        without this gate DELETE /api/users/<id>/ would be reachable by anyone.
+
+        This is irreversible: it takes the user's answers, required questions,
+        pictures, results, conversations, messages, posts, reports and notifications
+        with it (see the CASCADE relations on api.models). Use restrict/ban instead
+        when the account should merely be blocked.
+        """
+        admin = _resolve_acting_admin(request)
+        if not admin:
+            return Response({'error': 'Admin only'}, status=status.HTTP_403_FORBIDDEN)
+
+        user = self.get_object()
+
+        if str(user.id) == str(admin.id):
+            return Response(
+                {'error': 'You cannot delete the account you are signed in as.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Snapshot before the row disappears, so the response and the audit log can
+        # name what was removed.
+        deleted_label = user.email or user.username or str(user.id)
+        deleted_id = str(user.id)
+
+        with transaction.atomic():
+            total_rows, rows_by_model = user.delete()
+
+        logger.warning(
+            'ADMIN DELETE USER: %s (%s) deleted by %s (%s); %s rows removed: %s',
+            deleted_label, deleted_id, admin.email, admin.id, total_rows, rows_by_model,
+        )
+
+        return Response(
+            {
+                'status': 'user deleted',
+                'deleted_user_id': deleted_id,
+                'deleted_user': deleted_label,
+                'deleted_rows': total_rows,
+                'deleted_by_model': rows_by_model,
+            },
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=False, methods=['get'])
     def me(self, request):
