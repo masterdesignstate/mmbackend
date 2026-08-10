@@ -443,10 +443,21 @@ class UserViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         _expire_temporary_restrictions()
 
-        # For retrieve (single user lookup), include banned users so the frontend
-        # can detect the ban and show the appropriate overlay. `destroy` needs the
-        # unfiltered set too, or banned users would be undeletable.
-        if self.action in ['retrieve', 'restrict', 'remove_restriction', 'destroy']:
+        # The is_banned filter below exists to keep restricted people out of DISCOVERY.
+        # It must not apply to detail actions that operate on a single, known user:
+        #
+        #  - retrieve            so the frontend can detect the ban and show its overlay
+        #  - restrict / remove_restriction / destroy   moderation targets a banned user
+        #  - pictures / reorder_pictures / delete_picture / update_online_status
+        #        these are self-service. A brand new signup is is_banned=True until they
+        #        verify their email (see apply_email_verification_restriction), so
+        #        filtering here made someone invisible to their own endpoints during
+        #        onboarding — uploading a photo 404'd with "No User matches the given
+        #        query" at exactly the moment they were asked to upload one.
+        if self.action in [
+            'retrieve', 'restrict', 'remove_restriction', 'destroy',
+            'pictures', 'reorder_pictures', 'delete_picture', 'update_online_status',
+        ]:
             return User.objects.prefetch_related('answers__question').all()
 
         # For list/other actions, exclude banned users and current user
