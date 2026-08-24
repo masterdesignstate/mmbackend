@@ -191,7 +191,7 @@ USE_AZURE_STORAGE = config('AZURE_ACCOUNT_NAME', default=None) is not None
 # Admin dashboard access
 ADMIN_EMAILS = [
     email.strip().lower()
-    for email in config('ADMIN_EMAILS', default='admin@matchmatical.com').split(',')
+    for email in config('ADMIN_EMAILS', default='admin@compatiblefirst.com').split(',')
     if email.strip()
 ]
 

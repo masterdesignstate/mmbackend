@@ -4,7 +4,7 @@ from typing import Iterable, Set
 
 from django.conf import settings
 
-DEFAULT_ADMIN_EMAIL = "admin@matchmatical.com"
+DEFAULT_ADMIN_EMAIL = "admin@compatiblefirst.com"
 PROFILE_ANSWER_NAMES = {
     "male": "male",
     "female": "female",

@@ -4,7 +4,7 @@ from django.conf import settings
 from django.contrib.auth.hashers import make_password
 from django.db import migrations
 
-DEFAULT_ADMIN_EMAIL = "admin@matchmatical.com"
+DEFAULT_ADMIN_EMAIL = "admin@compatiblefirst.com"
 DEFAULT_ADMIN_PASSWORD = "admin#1234#"
 
 
