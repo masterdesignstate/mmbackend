@@ -106,7 +106,7 @@ class Command(BaseCommand):
                     skip_me=False,
                     skip_looking_for=False,
                     open_to_all_me=False,
-                    open_to_all_looking_for=False,
+                    open_to_all_looking_for=True,
                     is_group=False,
                 )
                 for tag_name in item['tags']:

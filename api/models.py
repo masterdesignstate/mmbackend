@@ -199,6 +199,19 @@ class Question(models.Model):
     is_group = models.BooleanField(default=False, help_text="Whether this question represents a group/category")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        # Optional questions always allow a user to accept any answer on the Them side.
+        # OTA does not apply to the user's own (Me) answer for optional questions.
+        if not self.is_mandatory:
+            self.open_to_all_me = False
+            self.open_to_all_looking_for = True
+            if kwargs.get('update_fields') is not None:
+                kwargs['update_fields'] = set(kwargs['update_fields']) | {
+                    'open_to_all_me',
+                    'open_to_all_looking_for',
+                }
+        super().save(*args, **kwargs)
     
     def __str__(self):
         return self.text[:50]
