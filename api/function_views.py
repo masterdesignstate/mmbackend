@@ -793,7 +793,7 @@ def check_onboarding_status(request):
         
         has_profile_photo = bool(user.profile_photo)
 
-        # Check if user has answered mandatory questions (questions 1-10)
+        # Check if user has answered the mandatory questions
         from .models import UserAnswer, Question
         mandatory_questions = Question.objects.filter(is_mandatory=True)
         mandatory_question_ids = set(mandatory_questions.values_list('id', flat=True))

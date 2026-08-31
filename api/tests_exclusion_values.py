@@ -1,5 +1,6 @@
 from django.test import TestCase
 
+from api import mandatory_questions as mq
 from api.models import Compatibility, Question, QuestionAnswer, User, UserAnswer
 from api.views import (
     _apply_importance_exclusions,
@@ -30,7 +31,7 @@ class ExcludedAnswerValuesTests(TestCase):
         return question
 
     def test_relationship_exclusions_allow_full_scale(self):
-        question = self.make_question(1, question_name='Date')
+        question = self.make_question(mq.RELATIONSHIP, question_name='Date')
 
         self.assertEqual(
             _allowed_excluded_answer_values_for_question(question),
@@ -39,13 +40,13 @@ class ExcludedAnswerValuesTests(TestCase):
         self.assertEqual(_normalize_excluded_answer_values([1, 3, 5], question), [1, 3, 5])
 
     def test_scale_based_mandatory_exclusions_allow_full_scale(self):
-        for question_number in [2, 3, 7, 8, 11]:
+        for question_number in sorted(mq.FULL_SCALE_EXCLUSION_NUMBERS):
             question = self.make_question(question_number)
             self.assertEqual(_allowed_excluded_answer_values_for_question(question), {1, 2, 3, 4, 5})
             self.assertEqual(_normalize_excluded_answer_values([1, 2, 3, 4, 5], question), [1, 2, 3, 4, 5])
 
     def test_excluded_values_drop_own_answer(self):
-        question = self.make_question(7)
+        question = self.make_question(mq.ALCOHOL)
 
         self.assertEqual(
             _normalize_excluded_answer_values([1, 3, 5], question, own_answer=3),
@@ -53,15 +54,15 @@ class ExcludedAnswerValuesTests(TestCase):
         )
 
     def test_education_exclusions_only_allow_three_points(self):
-        question = self.make_question(4, values=[1, 3, 5])
+        question = self.make_question(mq.EDUCATION, values=[1, 3, 5])
         self.assertEqual(_allowed_excluded_answer_values_for_question(question), {1, 3, 5})
         self.assertEqual(_normalize_excluded_answer_values([5, 1, 3], question), [5, 1, 3])
         with self.assertRaises(ValueError):
             _normalize_excluded_answer_values([2], question)
 
     def test_kids_have_and_want_have_different_exclusion_shapes(self):
-        kids_have = self.make_question(10, group_number=1, question_name='Have', values=[1, 5])
-        kids_want = self.make_question(10, group_number=2, question_name='Want')
+        kids_have = self.make_question(mq.HAVE_KIDS, question_name='Have Kids', values=[1, 5])
+        kids_want = self.make_question(mq.WANT_KIDS, question_name='Want Kids')
 
         self.assertEqual(_allowed_excluded_answer_values_for_question(kids_have), {1, 5})
         self.assertEqual(
@@ -73,7 +74,7 @@ class ExcludedAnswerValuesTests(TestCase):
         self.assertEqual(_normalize_excluded_answer_values([1, 2, 3, 4, 5], kids_want), [1, 2, 3, 4, 5])
 
     def test_apply_path_can_drop_stale_unsupported_values(self):
-        question = self.make_question(5, values=[1, 5])
+        question = self.make_question(mq.DIET, values=[1, 5])
 
         self.assertEqual(
             _normalize_excluded_answer_values([1, 2, 5], question, drop_unsupported=True),
@@ -81,8 +82,8 @@ class ExcludedAnswerValuesTests(TestCase):
         )
 
     def test_answer_values_must_match_question_answer_rows(self):
-        education = self.make_question(4, values=[1, 3, 5])
-        kids_have = self.make_question(10, group_number=1, question_name='Have', values=[1, 5])
+        education = self.make_question(mq.EDUCATION, values=[1, 3, 5])
+        kids_have = self.make_question(mq.HAVE_KIDS, question_name='Have Kids', values=[1, 5])
 
         self.assertEqual(_normalize_question_answer_value(5, education), 5)
         self.assertEqual(_normalize_question_answer_value(3, education), 3)
@@ -95,7 +96,7 @@ class ExcludedAnswerValuesTests(TestCase):
             _normalize_question_answer_value(3, kids_have)
 
     def test_faith_answer_values_allow_full_scale_even_with_endpoint_rows(self):
-        faith = self.make_question(11, values=[1, 5])
+        faith = self.make_question(mq.FAITH, values=[1, 5])
 
         self.assertEqual(_normalize_question_answer_value(3, faith), 3)
         self.assertEqual(_normalize_question_answer_value(4, faith), 4)
@@ -104,7 +105,7 @@ class ExcludedAnswerValuesTests(TestCase):
 class ImportanceExclusionTests(TestCase):
     def make_question(self):
         question = Question.objects.create(
-            question_number=11,
+            question_number=mq.FAITH,
             question_name='Test',
             group_name='Test',
             text='Importance test question',

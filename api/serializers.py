@@ -5,6 +5,7 @@ from .models import (
     Post, PostImage, PostHashtag, PostRevision, PostReaction, PostComment, FeedActivity,
     PromptTemplate, UserProfilePrompt, PromptPollVote, RestrictedWord,
 )
+from . import mandatory_questions as mq
 from .utils.admin_utils import profile_answer_key
 
 
@@ -209,7 +210,7 @@ class UserSerializer(serializers.ModelSerializer):
         """Get key profile answers for grouped onboarding questions."""
         answers = UserAnswer.objects.filter(
             user=obj,
-            question__question_number__in=[1, 2]
+            question__question_number__in=mq.PROFILE_SUMMARY_QUESTION_NUMBERS
         ).select_related('question')
 
         answer_map = {}

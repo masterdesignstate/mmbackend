@@ -10,6 +10,7 @@ from django.core.management.base import CommandError
 from django.test import TestCase
 
 from api.management.commands import import_dummy_users as importer
+from api import mandatory_questions as mq
 from api.models import Question, QuestionAnswer
 
 
@@ -20,14 +21,18 @@ class ImportDummyUsersTests(TestCase):
             group_number=group_number,
             question_name=name,
             group_name={
-                1: "Relationship",
-                2: "Gender",
-                3: "Ethnicity",
-                4: "Education",
-                5: "Diet",
-                6: "Exercise",
-                7: "Habits",
-                10: "Kids",
+                mq.RELATIONSHIP: "Relationship",
+                mq.FEMALE: "Female",
+                mq.MALE: "Male",
+                mq.ETHNICITY: "Ethnicity",
+                mq.EDUCATION: "Education",
+                mq.DIET: "Diet",
+                mq.EXERCISE: "Exercise",
+                mq.ALCOHOL: "Alcohol",
+                mq.CIGARETTES: "Cigarettes",
+                mq.VAPE: "Vape",
+                mq.WANT_KIDS: "Want Kids",
+                mq.HAVE_KIDS: "Have Kids",
             }.get(number, ""),
             text=f"{number} {name}",
             is_mandatory=True,
@@ -45,25 +50,26 @@ class ImportDummyUsersTests(TestCase):
     def create_mandatory_questions(self):
         Question.objects.all().delete()
         for group, name in enumerate(["Friend", "Hookup", "Date", "Partner"], start=1):
-            self.create_question(1, name, group)
-        for group, name in enumerate(["Male", "Female"], start=1):
-            self.create_question(2, name, group)
+            self.create_question(mq.RELATIONSHIP, name, group)
+        self.create_question(mq.FEMALE, "Female")
+        self.create_question(mq.MALE, "Male")
         for group, name in enumerate(["White", "Black", "Native", "Hispanic", "Asian", "Other"], start=1):
-            self.create_question(3, name, group)
+            self.create_question(mq.ETHNICITY, name, group)
         for group, name in enumerate(
             ["Pre High School", "High School", "Trade", "Undergraduate", "Masters", "Doctorate"],
             start=1,
         ):
-            self.create_question(4, name, group, values=[1, 3, 5])
+            self.create_question(mq.EDUCATION, name, group, values=[1, 3, 5])
         for group, name in enumerate(["Omnivore", "Pescatarian", "Vegetarian", "Vegan"], start=1):
-            self.create_question(5, name, group)
-        self.create_question(6, "Exercise")
-        for group, name in enumerate(["Alcohol", "Cigarettes", "Vape"], start=1):
-            self.create_question(7, name, group)
-        self.create_question(8, "Religion")
-        self.create_question(9, "Politics")
-        self.create_question(10, "Have", 1, values=[1, 5])
-        self.create_question(10, "Want", 2)
+            self.create_question(mq.DIET, name, group)
+        self.create_question(mq.EXERCISE, "Exercise")
+        self.create_question(mq.ALCOHOL, "Alcohol")
+        self.create_question(mq.CIGARETTES, "Cigarettes")
+        self.create_question(mq.VAPE, "Vape")
+        self.create_question(mq.RELIGION, "Religion")
+        self.create_question(mq.POLITICS, "Politics")
+        self.create_question(mq.HAVE_KIDS, "Have Kids", values=[1, 5])
+        self.create_question(mq.WANT_KIDS, "Want Kids")
 
     def test_resolve_genders_requires_exact_500_500_split(self):
         rows = [{"first_name": "Adam", "gender": "male"} for _ in range(500)]
@@ -129,19 +135,19 @@ class ImportDummyUsersTests(TestCase):
                 self.assertIn(answer.looking_for_answer, valid)
 
         by_name = {(a.question.question_number, a.question.question_name): a for a in answers}
-        self.assertEqual(by_name[(1, "Friend")].me_answer, 5)
-        self.assertEqual(by_name[(1, "Hookup")].looking_for_answer, 1)
-        self.assertEqual(by_name[(2, "Male")].me_answer, 5)
-        self.assertEqual(by_name[(2, "Female")].me_answer, 1)
-        self.assertTrue(by_name[(2, "Male")].looking_for_open_to_all)
-        self.assertEqual(by_name[(4, "Masters")].me_answer, 1)
-        self.assertEqual(by_name[(4, "Masters")].looking_for_answer, 5)
-        self.assertEqual(by_name[(7, "Alcohol")].me_answer, 1)
-        self.assertEqual(by_name[(7, "Alcohol")].looking_for_answer, 5)
-        self.assertEqual(by_name[(10, "Have")].me_answer, 1)
-        self.assertEqual(by_name[(10, "Have")].looking_for_answer, 5)
-        self.assertEqual(by_name[(10, "Want")].me_answer, 2)
-        self.assertEqual(by_name[(10, "Want")].looking_for_answer, 4)
+        self.assertEqual(by_name[(mq.RELATIONSHIP, "Friend")].me_answer, 5)
+        self.assertEqual(by_name[(mq.RELATIONSHIP, "Hookup")].looking_for_answer, 1)
+        self.assertEqual(by_name[(mq.MALE, "Male")].me_answer, 5)
+        self.assertEqual(by_name[(mq.FEMALE, "Female")].me_answer, 1)
+        self.assertTrue(by_name[(mq.MALE, "Male")].looking_for_open_to_all)
+        self.assertEqual(by_name[(mq.EDUCATION, "Masters")].me_answer, 1)
+        self.assertEqual(by_name[(mq.EDUCATION, "Masters")].looking_for_answer, 5)
+        self.assertEqual(by_name[(mq.ALCOHOL, "Alcohol")].me_answer, 1)
+        self.assertEqual(by_name[(mq.ALCOHOL, "Alcohol")].looking_for_answer, 5)
+        self.assertEqual(by_name[(mq.HAVE_KIDS, "Have Kids")].me_answer, 1)
+        self.assertEqual(by_name[(mq.HAVE_KIDS, "Have Kids")].looking_for_answer, 5)
+        self.assertEqual(by_name[(mq.WANT_KIDS, "Want Kids")].me_answer, 2)
+        self.assertEqual(by_name[(mq.WANT_KIDS, "Want Kids")].looking_for_answer, 4)
 
     def write_large_csv(self, path):
         headers = [

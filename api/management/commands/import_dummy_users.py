@@ -14,6 +14,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
 
+from api import mandatory_questions as mq
 from api.models import Question, User, UserAnswer, UserPicture, UserRequiredQuestion
 from api.tagline_rewrites import rewrite_tagline
 
@@ -1384,27 +1385,31 @@ def build_mandatory_answers(import_row, mandatory_questions, seed=20260612):
 
     # 1 Relationship: CSV has only 1b. Use it as Me, no looking-for on hookup/date/partner.
     relationship_me = min(import_row.answers["1b"], 5)
-    for question in grouped.get(1, []):
+    for question in grouped.get(mq.RELATIONSHIP, []):
         add(question, normalize_to_valid(relationship_me, question_values(question)), 1)
 
-    # 2 Gender.
+    # Gender — Female and Male are separate questions now, so walk both numbers.
     gender_lf = import_row.answers["2b"]
-    for question in grouped.get(2, []):
-        is_male_question = (question.question_name or "").lower() == "male"
-        if import_row.gender == "male":
-            me = 5 if is_male_question else 1
-        else:
-            me = 1 if is_male_question else 5
+    for number in (mq.FEMALE, mq.MALE):
+        is_male_question = number == mq.MALE
+        for question in grouped.get(number, []):
+            if import_row.gender == "male":
+                me = 5 if is_male_question else 1
+            else:
+                me = 1 if is_male_question else 5
 
-        if gender_lf == 6:
-            add(question, me, 6, lf_open=True)
-        else:
-            same_gender = (import_row.gender == "male" and is_male_question) or (import_row.gender == "female" and not is_male_question)
-            lf = 6 - gender_lf if same_gender else gender_lf
-            add(question, me, normalize_to_valid(lf, question_values(question)))
+            if gender_lf == 6:
+                add(question, me, 6, lf_open=True)
+            else:
+                same_gender = (
+                    (import_row.gender == "male" and is_male_question)
+                    or (import_row.gender == "female" and not is_male_question)
+                )
+                lf = 6 - gender_lf if same_gender else gender_lf
+                add(question, me, normalize_to_valid(lf, question_values(question)))
 
-    # 3 Ethnicity: choose one primary ethnicity row deterministically.
-    ethnicity_questions = grouped.get(3, [])
+    # Ethnicity: choose one primary ethnicity row deterministically.
+    ethnicity_questions = grouped.get(mq.ETHNICITY, [])
     if ethnicity_questions:
         primary_index = stable_int(seed, import_row.username, "ethnicity") % len(ethnicity_questions)
         ethnicity_lf = import_row.answers["3b"]
@@ -1422,55 +1427,57 @@ def build_mandatory_answers(import_row, mandatory_questions, seed=20260612):
     # 4 Education.
     education_me = normalize_education(import_row.answers["4a"])
     education_lf_raw = import_row.answers["4b"]
-    for question in grouped.get(4, []):
+    for question in grouped.get(mq.EDUCATION, []):
         if education_lf_raw == 6:
             add(question, education_me, 6, lf_open=True)
         else:
             add(question, education_me, normalize_education(education_lf_raw))
 
-    # 5 Diet.
+    # Diet.
     diet_lf = import_row.answers["5b"]
-    for question in grouped.get(5, []):
+    for question in grouped.get(mq.DIET, []):
         me = normalize_to_valid(import_row.answers["5a"], question_values(question))
         if diet_lf == 6:
             add(question, me, 6, lf_open=True)
         else:
             add(question, me, normalize_to_valid(diet_lf, question_values(question)))
 
-    # 6, 8, 9 single direct questions.
-    for number in (6, 8, 9):
+    # Exercise, Religion and Politics: one question each, still one CSV column each.
+    for csv_key, number in (("6", mq.EXERCISE), ("8", mq.RELIGION), ("9", mq.POLITICS)):
         questions = grouped.get(number, [])
         if len(questions) != 1:
             raise CommandError(f"Expected one mandatory question for number {number}, found {len(questions)}")
         question = questions[0]
-        lf = import_row.answers[f"{number}b"]
-        me = normalize_to_valid(import_row.answers[f"{number}a"], question_values(question))
+        lf = import_row.answers[f"{csv_key}b"]
+        me = normalize_to_valid(import_row.answers[f"{csv_key}a"], question_values(question))
         if lf == 6:
             add(question, me, 6, lf_open=True)
         else:
             add(question, me, normalize_to_valid(lf, question_values(question)))
 
-    # 7 Habits: yes/no style 1 or 5 only, with OTA allowed for looking-for.
+    # Habits: one CSV column still drives all three, yes/no style 1 or 5 only,
+    # with OTA allowed for looking-for.
     habits_me = 1 if import_row.answers["7a"] <= 3 else 5
     habits_lf_raw = import_row.answers["7b"]
-    for question in grouped.get(7, []):
-        if habits_lf_raw == 6:
-            add(question, habits_me, 6, lf_open=True)
-        else:
-            habits_lf = 1 if habits_lf_raw <= 3 else 5
-            add(question, habits_me, habits_lf)
+    for number in (mq.ALCOHOL, mq.CIGARETTES, mq.VAPE):
+        for question in grouped.get(number, []):
+            if habits_lf_raw == 6:
+                add(question, habits_me, 6, lf_open=True)
+            else:
+                habits_lf = 1 if habits_lf_raw <= 3 else 5
+                add(question, habits_me, habits_lf)
 
-    # 10 Kids: Have is 1/5, Want is 1-5; b=6 is OTA for both.
+    # Kids: Have is 1/5, Want is 1-5; b=6 is OTA for both.
     kids_lf_raw = import_row.answers["10b"]
-    for question in grouped.get(10, []):
-        name = (question.question_name or "").lower()
-        if name == "have":
-            me = normalize_have_kids(import_row.answers["10a"])
-            lf = normalize_have_kids(kids_lf_raw) if kids_lf_raw != 6 else 6
-        else:
-            me = normalize_to_valid(import_row.answers["10a"], question_values(question))
-            lf = normalize_to_valid(kids_lf_raw, question_values(question)) if kids_lf_raw != 6 else 6
-        add(question, me, lf, lf_open=(kids_lf_raw == 6))
+    for number in (mq.WANT_KIDS, mq.HAVE_KIDS):
+        for question in grouped.get(number, []):
+            if number == mq.HAVE_KIDS:
+                me = normalize_have_kids(import_row.answers["10a"])
+                lf = normalize_have_kids(kids_lf_raw) if kids_lf_raw != 6 else 6
+            else:
+                me = normalize_to_valid(import_row.answers["10a"], question_values(question))
+                lf = normalize_to_valid(kids_lf_raw, question_values(question)) if kids_lf_raw != 6 else 6
+            add(question, me, lf, lf_open=(kids_lf_raw == 6))
 
     if len(planned) != EXPECTED_MANDATORY_QUESTION_COUNT:
         raise CommandError(

@@ -4,6 +4,7 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from api import mandatory_questions as mq
 from api.models import Question, User, UserAnswer, UserRestrictionHistory
 
 
@@ -69,21 +70,21 @@ class RestrictionDashboardTests(TestCase):
 
     def test_admin_profiles_includes_real_gender_answers(self):
         question_friend = Question.objects.create(
-            question_number=1,
+            question_number=mq.RELATIONSHIP,
             question_name='Friend',
             group_name='Relationship',
             text='How strongly are you looking for friendship?',
             is_approved=True,
         )
         question_male = Question.objects.create(
-            question_number=2,
+            question_number=mq.MALE,
             question_name='Male',
             group_name='Gender',
             text='How strongly do you identify as male?',
             is_approved=True,
         )
         question_female = Question.objects.create(
-            question_number=2,
+            question_number=mq.FEMALE,
             question_name='Female',
             group_name='Gender',
             text='How strongly do you identify as female?',

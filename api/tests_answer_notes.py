@@ -2,6 +2,7 @@ from django.core.cache import cache
 from django.test import TestCase
 from rest_framework.test import APIClient
 
+from api import mandatory_questions as mq
 from api.models import Question, QuestionAnswer, RestrictedWord, User, UserAnswer, UserResult
 from api.serializers import UserAnswerSerializer
 
@@ -21,7 +22,7 @@ class AnswerNoteTestBase(TestCase):
         )
 
         self.question = Question.objects.create(
-            question_number=11,
+            question_number=mq.FAITH,
             question_name='Test',
             group_name='Test',
             text='Test question',

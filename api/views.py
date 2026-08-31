@@ -39,6 +39,7 @@ from .serializers import (
     RestrictedWordSerializer,
 )
 from .permissions import IsDashboardAdmin
+from . import mandatory_questions as mq
 from .utils.admin_utils import profile_answer_key
 from .utils.word_filter import clear_restricted_words_cache
 
@@ -59,7 +60,7 @@ def _allowed_answer_values_for_question(question):
     if not question:
         return DEFAULT_EXCLUDED_ANSWER_VALUES
 
-    if question.question_number == 11:
+    if question.question_number == mq.FAITH:
         return DEFAULT_EXCLUDED_ANSWER_VALUES
 
     answer_values = set()
@@ -96,17 +97,16 @@ def _allowed_excluded_answer_values_for_question(question):
         return DEFAULT_EXCLUDED_ANSWER_VALUES
 
     question_number = question.question_number
-    question_name = (question.question_name or '').strip().lower()
 
     # Exclusions are scale-based for these questions even when the answer UI is grouped.
-    if question_number in {2, 3, 7, 8, 11}:
+    if question_number in mq.FULL_SCALE_EXCLUSION_NUMBERS:
         return DEFAULT_EXCLUDED_ANSWER_VALUES
 
-    if question_number == 4:
-        return {1, 3, 5}
+    if question_number == mq.EDUCATION:
+        return set(mq.EDUCATION_EXCLUSION_VALUES)
 
-    if question_number == 10 and (question.group_number == 1 or question_name == 'have'):
-        return {1, 5}
+    if question_number == mq.HAVE_KIDS:
+        return set(mq.HAVE_KIDS_EXCLUSION_VALUES)
 
     return _allowed_answer_values_for_question(question)
 
@@ -759,7 +759,7 @@ class UserViewSet(viewsets.ModelViewSet):
         user_ids = [user['id'] for user in users]
         profile_answers = UserAnswer.objects.filter(
             user_id__in=user_ids,
-            question__question_number__in=[1, 2],
+            question__question_number__in=mq.PROFILE_SUMMARY_QUESTION_NUMBERS,
         ).select_related('question').only('user_id', 'me_answer', 'question__question_name', 'question__text')
         for answer in profile_answers:
             key = profile_answer_key(answer.question)
