@@ -2480,7 +2480,9 @@ class QuestionViewSet(viewsets.ModelViewSet):
                 'question_type': question_type,
                 'is_required_for_match': is_required_for_match,
                 'is_mandatory': is_mandatory,
-                'submitted_by': submitted_by_user,
+                # submitted_by is NOT set here: it is read_only on QuestionSerializer, so DRF
+                # strips it from input data and the question would be saved with no submitter.
+                # It goes through serializer.save() below instead.
                 'is_approved': is_approved,
                 'skip_me': skip_me,
                 'skip_looking_for': skip_looking_for,
@@ -2496,7 +2498,11 @@ class QuestionViewSet(viewsets.ModelViewSet):
             
             serializer = self.get_serializer(data=question_data)
             serializer.is_valid(raise_exception=True)
-            question = serializer.save()
+            # Passed to save() rather than through the input data: `submitted_by` is a
+            # read_only serializer field, and read_only fields are dropped from validated_data.
+            # Every question created before this landed has submitted_by = NULL as a result,
+            # which is why the "Submitted" filter never matched anything.
+            question = serializer.save(submitted_by=submitted_by_user)
             
             # Invalidate metadata cache if question is approved (so it appears in questions list immediately)
             if question.is_approved:
