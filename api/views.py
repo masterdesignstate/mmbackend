@@ -3552,6 +3552,32 @@ class UserResultViewSet(viewsets.ModelViewSet):
 
         return Response({'tags': tags_list})
 
+    @action(detail=False, methods=['get'])
+    def incoming_tags(self, request):
+        """Tags other users have applied TO this user, keyed by who applied them.
+
+        `user_tags` answers one pair at a time, so the results grid was fetching it once per
+        card and still only learned what the viewer had done to each profile. Nothing told a
+        viewer that someone had already liked or approved *them* — that only surfaced after
+        they liked the person back. One query answers it for the whole page.
+        """
+        user_id = request.query_params.get('user_id')
+        if not user_id:
+            return Response(
+                {'error': 'user_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        pairs = UserResult.objects.filter(
+            result_user_id=user_id
+        ).values_list('user_id', 'tag')
+
+        tags_by_user = {}
+        for other_user_id, tag in pairs:
+            tags_by_user.setdefault(str(other_user_id), []).append(tag)
+
+        return Response({'tags_by_user': tags_by_user})
+
     @action(detail=False, methods=['post'])
     def send_note(self, request):
         """Send a note to another user (appears in notifications and as first message in chat)"""
@@ -4971,6 +4997,46 @@ class NoteVisibilityResolver:
         return False
 
 
+# A burst of activity from one person used to fill the whole feed — onboarding alone emits an
+# entry per mandatory question answered, so a new signup buried everyone else. Consecutive
+# entries of the same kind from the same person are rolled into one card instead of being
+# dropped, so nothing is lost and the bucket size stays tunable.
+FEED_GROUP_WINDOW = timedelta(hours=2)
+# How many of a group's payloads travel to the client; the card shows a few and counts the rest.
+FEED_GROUP_PAYLOAD_LIMIT = 5
+
+
+def _group_feed_activities(activities):
+    """Collapse runs of same-user, same-kind activity into one entry each.
+
+    `activities` must be newest-first. Grouping follows the gap between neighbouring entries
+    rather than fixed clock buckets, so a burst that straddles the top of the hour still
+    collapses into a single card.
+
+    Returns a list of (representative_activity, group_members) newest-first, where the
+    representative is the most recent entry of its group.
+    """
+    groups = []
+    # (user_id, kind) -> index into `groups` of the run still open for that pair
+    open_groups = {}
+
+    for activity in activities:
+        key = (activity.user_id, activity.kind)
+        index = open_groups.get(key)
+
+        if index is not None:
+            members = groups[index][1]
+            # Sorted newest-first, so the last member added is the oldest so far.
+            if members[-1].created_at - activity.created_at <= FEED_GROUP_WINDOW:
+                members.append(activity)
+                continue
+
+        groups.append((activity, [activity]))
+        open_groups[key] = len(groups) - 1
+
+    return groups
+
+
 def _activity_visibility_filter(viewer):
     """Q expression filtering FeedActivity rows visible to `viewer`
     based on each author's per-kind feed_visibility_* setting."""
@@ -5050,7 +5116,14 @@ class FeedView(viewsets.ViewSet):
         posts = list(posts_qs.order_by('-created_at')[:WINDOW])
         acts = list(acts_qs.order_by('-created_at')[:WINDOW]) if include_activities else []
 
-        items = [('post', p.created_at, p) for p in posts] + [(a.kind, a.created_at, a) for a in acts]
+        # Roll same-person bursts into one entry each before paginating, so a grouped burst
+        # occupies one slot rather than filling the page.
+        act_groups = _group_feed_activities(acts)
+
+        items = (
+            [('post', p.created_at, p, None) for p in posts]
+            + [(rep.kind, rep.created_at, rep, members) for rep, members in act_groups]
+        )
         items.sort(key=lambda t: t[1], reverse=True)
 
         start = (page - 1) * page_size
@@ -5060,11 +5133,17 @@ class FeedView(viewsets.ViewSet):
 
         ctx = {'request': request, 'viewer_id': viewer_id}
         results = []
-        for kind, created_at, obj in page_items:
+        for kind, created_at, obj, members in page_items:
             if kind == 'post':
                 results.append({'kind': 'post', 'created_at': created_at, 'post': PostSerializer(obj, context=ctx).data})
             else:
-                results.append({'kind': obj.kind, 'created_at': created_at, 'activity': FeedActivitySerializer(obj).data})
+                activity = FeedActivitySerializer(obj).data
+                if members and len(members) > 1:
+                    activity['group_count'] = len(members)
+                    activity['group_payloads'] = [
+                        member.payload or {} for member in members[:FEED_GROUP_PAYLOAD_LIMIT]
+                    ]
+                results.append({'kind': obj.kind, 'created_at': created_at, 'activity': activity})
         return Response({
             'results': results, 'has_next': has_next, 'page': page,
             'audience': audience, 'q': q, 'hashtag': hashtag,
