@@ -177,6 +177,8 @@ class CompatibilityService:
         exclude_required: bool = False,
         user1_answers: Optional[List[UserAnswer]] = None,
         user2_answers: Optional[List[UserAnswer]] = None,
+        user1_required_qids: Optional[set] = None,
+        user2_required_qids: Optional[set] = None,
     ) -> Dict[str, float]:
         """
         Calculate full compatibility between two users with caching.
@@ -194,6 +196,11 @@ class CompatibilityService:
             exclude_required: If True, caller is expected to supply answers with required questions removed
             user1_answers: Optional pre-fetched answers for user1 (required sets come from UserRequiredQuestion)
             user2_answers: Optional pre-fetched answers for user2 (required sets come from UserRequiredQuestion)
+            user1_required_qids: Optional pre-fetched required question ids for user1
+            user2_required_qids: Optional pre-fetched required question ids for user2
+                Pass both when calling this in a loop. Otherwise each call issues two more
+                queries against UserRequiredQuestion, which is what made the results page's
+                required filters take ~2000 queries and time out behind a 30s gateway limit.
         """
         if required_only and exclude_required:
             raise ValueError("required_only and exclude_required cannot both be True")
@@ -255,13 +262,16 @@ class CompatibilityService:
             'mutual_questions_count': mutual_count,
         }
 
-        # Calculate required compatibility (per-user: from UserRequiredQuestion)
-        user1_required_qids = set(
-            UserRequiredQuestion.objects.filter(user=user1).values_list('question_id', flat=True)
-        )
-        user2_required_qids = set(
-            UserRequiredQuestion.objects.filter(user=user2).values_list('question_id', flat=True)
-        )
+        # Calculate required compatibility (per-user: from UserRequiredQuestion).
+        # Only query when the caller has not already supplied these.
+        if user1_required_qids is None:
+            user1_required_qids = set(
+                UserRequiredQuestion.objects.filter(user=user1).values_list('question_id', flat=True)
+            )
+        if user2_required_qids is None:
+            user2_required_qids = set(
+                UserRequiredQuestion.objects.filter(user=user2).values_list('question_id', flat=True)
+            )
 
         if not user1_required_qids and not user2_required_qids:
             # No per-user required: required scores equal overall, completeness 1.0

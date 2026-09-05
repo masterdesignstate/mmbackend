@@ -1398,6 +1398,15 @@ class UserViewSet(viewsets.ModelViewSet):
                     for answer in other_answers_qs:
                         answers_by_user[answer.user_id].append(answer)
 
+                    # One query for everyone's required set. Without this the service call
+                    # below issues two of its own per user — ~2,240 round trips for this page,
+                    # which is what pushed the request past the 30s gateway timeout.
+                    missing_required_qids = defaultdict(set)
+                    for uid, qid in UserRequiredQuestion.objects.filter(
+                        user_id__in=missing_user_ids
+                    ).values_list('user_id', 'question_id'):
+                        missing_required_qids[str(uid)].add(qid)
+
                     for item in compatibility_results:
                         if not item['missing_required']:
                             continue
@@ -1408,6 +1417,8 @@ class UserViewSet(viewsets.ModelViewSet):
                             exclude_required=True,
                             user1_answers=current_user_non_required_answers,
                             user2_answers=other_answers,
+                            user1_required_qids=current_user_required_qids,
+                            user2_required_qids=missing_required_qids.get(str(item['user'].id), set()),
                         )
 
                 # their_missing_required: has current user answered all questions that OTHER user marked required?
@@ -1499,6 +1510,12 @@ class UserViewSet(viewsets.ModelViewSet):
                                 exclude_required=True,
                                 user1_answers=current_user_non_required_answers,
                                 user2_answers=other_answers,
+                                user1_required_qids=current_user_required_qids,
+                                # Already fetched in bulk above for every other user.
+                                user2_required_qids=other_user_required_qids.get(
+                                    str(item['user'].id).lower(),
+                                    other_user_required_qids.get(str(item['user'].id), set()),
+                                ),
                             )
 
                 # When required_scope=their, compute their_required_compatibility on the fly if missing/0 (e.g. never recalculated)
@@ -1512,7 +1529,13 @@ class UserViewSet(viewsets.ModelViewSet):
                         if trc_val == 0:
                             try:
                                 data = CompatibilityService.calculate_compatibility_between_users(
-                                    request.user, item['user']
+                                    request.user,
+                                    item['user'],
+                                    user1_required_qids=current_user_required_qids,
+                                    user2_required_qids=other_user_required_qids.get(
+                                        str(item['user'].id).lower(),
+                                        other_user_required_qids.get(str(item['user'].id), set()),
+                                    ),
                                 )
                                 item['compatibility']['their_required_compatibility'] = data.get(
                                     'their_required_compatibility', 0
