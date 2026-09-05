@@ -1,10 +1,10 @@
-"""Rename the middle Want Kids answer from "Unsure" to "Open to Both".
+"""Set the middle Want Kids answer (value 3) to "Open".
 
-The frontend renders this caption from `WANT_KIDS_ANSWER_LABELS`, so every user-facing
-surface already says "Open to Both". The stored `QuestionAnswer.answer_text` was still
-"Unsure", which is what the admin question editor reads — this brings the row in line.
+The frontend renders this caption from `WANT_KIDS_ANSWER_LABELS`. The stored
+`QuestionAnswer.answer_text` is what the admin question editor reads, so it has to match or
+the two disagree — it previously read "Unsure".
 
-Idempotent: matching on the old text means a second run finds nothing to do.
+Idempotent: rows already reading "Open" are left alone, so a second run does nothing.
 """
 
 from django.core.management.base import BaseCommand
@@ -13,13 +13,12 @@ from django.db import transaction
 from api.mandatory_questions import WANT_KIDS
 from api.models import QuestionAnswer
 
-OLD_TEXT = 'Unsure'
-NEW_TEXT = 'Open to Both'
+NEW_TEXT = 'Open'
 ANSWER_VALUE = '3'
 
 
 class Command(BaseCommand):
-    help = 'Rename the Want Kids answer "Unsure" to "Open to Both".'
+    help = 'Rename the Want Kids answer to "Open".'
 
     def add_arguments(self, parser):
         parser.add_argument(
