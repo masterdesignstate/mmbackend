@@ -953,7 +953,18 @@ class UserViewSet(viewsets.ModelViewSet):
                 'required_im_compatible_with': 'required_im_compatible_with',
             }.get(compatibility_type, 'overall_compatibility')
 
-            apply_required_filter = required_only
+            # The four tag chips (My/Their Complete/Pending) need this branch just as much as
+            # the Required Questions toggle does: `missing_required` is computed inside it, and
+            # so is the filtering that consumes it. Keyed to the toggle alone, ticking a chip
+            # returned every user with `missing_required` unset — the list was unfiltered while
+            # the UI coloured every card as though it had qualified.
+            apply_required_filter = (
+                required_only
+                or filter_required
+                or filter_pending
+                or filter_their_required
+                or filter_their_pending
+            )
 
             # Determine which field to use for sorting
             if sort_by.startswith('required_'):
