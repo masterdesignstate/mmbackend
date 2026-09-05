@@ -5042,8 +5042,10 @@ class NoteVisibilityResolver:
 # entries of the same kind from the same person are rolled into one card instead of being
 # dropped, so nothing is lost and the bucket size stays tunable.
 FEED_GROUP_WINDOW = timedelta(hours=2)
-# How many of a group's payloads travel to the client; the card shows a few and counts the rest.
-FEED_GROUP_PAYLOAD_LIMIT = 5
+# How many of a group's payloads travel to the client. The card shows the first few and
+# expands to the rest on tap, so this needs to cover a normal burst (onboarding is ~14)
+# without shipping an unbounded list for someone who answers hundreds in a sitting.
+FEED_GROUP_PAYLOAD_LIMIT = 25
 
 
 def _group_feed_activities(activities):
