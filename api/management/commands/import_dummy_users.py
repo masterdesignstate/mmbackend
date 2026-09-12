@@ -16,6 +16,7 @@ from django.utils import timezone
 
 from api import mandatory_questions as mq
 from api.models import Question, User, UserAnswer, UserPicture, UserRequiredQuestion
+from api.services.faith_ideology_answers import GENERATED_QUESTION_NUMBERS, plan_generated_answers
 from api.tagline_rewrites import rewrite_tagline
 
 
@@ -25,7 +26,8 @@ DEFAULT_WOMEN_DIR = "/Users/dimi/Downloads/dummy_dating_users_thispersonnotexist
 DUMMY_EMAIL_DOMAIN = "dummy.matchmatical.local"
 EXPECTED_USER_COUNT = 1000
 EXPECTED_GENDER_COUNT = 500
-EXPECTED_MANDATORY_QUESTION_COUNT = 30
+# 30 rows for questions 1-14, plus 11 Faith and 6 Ideology options.
+EXPECTED_MANDATORY_QUESTION_COUNT = 47
 ALLOWED_PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 
 # This command intentionally uses a local first-name map so imports are deterministic
@@ -1478,6 +1480,15 @@ def build_mandatory_answers(import_row, mandatory_questions, seed=20260612):
                 me = normalize_to_valid(import_row.answers["10a"], question_values(question))
                 lf = normalize_to_valid(kids_lf_raw, question_values(question)) if kids_lf_raw != 6 else 6
             add(question, me, lf, lf_open=(kids_lf_raw == 6))
+
+    # Faith and Ideology: the CSV predates them being mandatory, so generate them the same
+    # way backfill_faith_ideology does for existing accounts.
+    for number in GENERATED_QUESTION_NUMBERS:
+        for generated in plan_generated_answers(import_row.username, number, grouped.get(number, []), seed):
+            planned.append(PlannedAnswer(
+                generated.question, generated.me_answer, False,
+                generated.looking_for_answer, generated.looking_for_open_to_all,
+            ))
 
     if len(planned) != EXPECTED_MANDATORY_QUESTION_COUNT:
         raise CommandError(

@@ -22,6 +22,9 @@ from api.models import Question, QuestionNumberCounter
 
 SHIFT = 4
 OLD_LAST_MANDATORY = 10
+# The block as this split left it. Frozen rather than read from `mq`: Faith and Ideology
+# joined the mandatory block afterwards, and a re-run must still recognise a split database.
+SPLIT_LAST_MANDATORY = OLD_LAST_MANDATORY + SHIFT
 
 # (old question_number, old group_number) -> new number. group_number None means the
 # question was already standalone.
@@ -77,7 +80,7 @@ class Command(BaseCommand):
             .distinct()
             .count()
         )
-        if distinct_mandatory == len(mq.MANDATORY_QUESTION_NUMBERS):
+        if distinct_mandatory >= SPLIT_LAST_MANDATORY:
             self.stdout.write(self.style.WARNING(
                 'Already split: mandatory questions occupy '
                 f'{distinct_mandatory} distinct numbers. Nothing to do.'
@@ -162,6 +165,6 @@ class Command(BaseCommand):
             )
 
         self.stdout.write(self.style.SUCCESS(
-            f'Split complete: mandatory questions now 1..{mq.LAST_MANDATORY_QUESTION_NUMBER}, '
-            f'{to_shift} optional questions shifted to {mq.FIRST_OPTIONAL_QUESTION_NUMBER}+.'
+            f'Split complete: mandatory questions now 1..{SPLIT_LAST_MANDATORY}, '
+            f'{to_shift} optional questions shifted to {SPLIT_LAST_MANDATORY + 1}+.'
         ))

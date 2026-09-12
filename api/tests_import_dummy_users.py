@@ -33,6 +33,8 @@ class ImportDummyUsersTests(TestCase):
                 mq.VAPE: "Vape",
                 mq.WANT_KIDS: "Want Kids",
                 mq.HAVE_KIDS: "Have Kids",
+                mq.FAITH: "Faith",
+                mq.IDEOLOGY: "Ideology",
             }.get(number, ""),
             text=f"{number} {name}",
             is_mandatory=True,
@@ -70,6 +72,12 @@ class ImportDummyUsersTests(TestCase):
         self.create_question(mq.POLITICS, "Politics")
         self.create_question(mq.HAVE_KIDS, "Have Kids", values=[1, 5])
         self.create_question(mq.WANT_KIDS, "Want Kids")
+        faiths = ["Christian", "Muslim", "Jewish", "Buddhist", "Pagan", "Other",
+                  "Spiritual", "Atheist", "Agnostic", "Nonspiritual", "Hindu"]
+        for group, name in enumerate(faiths, start=1):
+            self.create_question(mq.FAITH, name, group, values=[1, 5])
+        for group, name in enumerate(["Left", "Right", "Moderate", "Non-binary", "Anarchist", "Apolitical"], start=1):
+            self.create_question(mq.IDEOLOGY, name, group)
 
     def test_resolve_genders_requires_exact_500_500_split(self):
         rows = [{"first_name": "Adam", "gender": "male"} for _ in range(500)]
@@ -122,7 +130,7 @@ class ImportDummyUsersTests(TestCase):
 
         answers = importer.build_mandatory_answers(row, questions)
 
-        self.assertEqual(len(answers), 30)
+        self.assertEqual(len(answers), importer.EXPECTED_MANDATORY_QUESTION_COUNT)
         for answer in answers:
             valid = {int(option.value) for option in answer.question.answers.all()}
             if answer.me_open_to_all:
@@ -148,6 +156,10 @@ class ImportDummyUsersTests(TestCase):
         self.assertEqual(by_name[(mq.HAVE_KIDS, "Have Kids")].looking_for_answer, 5)
         self.assertEqual(by_name[(mq.WANT_KIDS, "Want Kids")].me_answer, 2)
         self.assertEqual(by_name[(mq.WANT_KIDS, "Want Kids")].looking_for_answer, 4)
+        for number in (mq.FAITH, mq.IDEOLOGY):
+            generated = [a for a in answers if a.question.question_number == number]
+            self.assertEqual(len([a for a in generated if a.me_answer != 1]), 1)
+            self.assertTrue(all(a.looking_for_open_to_all for a in generated))
 
     def write_large_csv(self, path):
         headers = [
@@ -254,4 +266,4 @@ class ImportDummyUsersTests(TestCase):
         rendered = output.getvalue()
         self.assertIn("CSV rows: 1000", rendered)
         self.assertIn("Gender split: 500 men, 500 women", rendered)
-        self.assertIn("Mandatory answers: 30000", rendered)
+        self.assertIn(f"Mandatory answers: {importer.EXPECTED_MANDATORY_QUESTION_COUNT * 1000}", rendered)

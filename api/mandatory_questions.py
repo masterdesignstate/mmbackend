@@ -3,8 +3,10 @@ Canonical numbering for the mandatory onboarding questions.
 
 The three "multi" questions — Gender, Habits and Kids — used to pack two or three
 sub-questions behind a single ``question_number``, which forced the onboarding page to
-label every slider row. They are now standalone questions, so the mandatory block runs
-1..14 and every optional question starts at 15.
+label every slider row. They are now standalone questions. Faith and Ideology were optional
+until September 2026, when they joined the mandatory block (``backfill_faith_ideology``
+filled them in for existing accounts), so it runs 1..16 and every optional question starts
+at 17.
 
 Import from here instead of writing the literals; the split is easy to get subtly wrong
 when the numbers are scattered across views, serializers and scripts.
@@ -24,13 +26,11 @@ RELIGION = 11
 POLITICS = 12
 WANT_KIDS = 13
 HAVE_KIDS = 14
-
-LAST_MANDATORY_QUESTION_NUMBER = HAVE_KIDS
-FIRST_OPTIONAL_QUESTION_NUMBER = LAST_MANDATORY_QUESTION_NUMBER + 1
-
-# Optional questions that still carry per-number behaviour.
 FAITH = 15
 IDEOLOGY = 16
+
+LAST_MANDATORY_QUESTION_NUMBER = IDEOLOGY
+FIRST_OPTIONAL_QUESTION_NUMBER = LAST_MANDATORY_QUESTION_NUMBER + 1
 
 MANDATORY_QUESTION_NUMBERS = tuple(range(RELATIONSHIP, LAST_MANDATORY_QUESTION_NUMBER + 1))
 

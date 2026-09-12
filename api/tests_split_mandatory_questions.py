@@ -3,6 +3,7 @@ from django.core.management.base import CommandError
 from django.test import TestCase
 
 from api import mandatory_questions as mq
+from api.management.commands.split_mandatory_questions import SPLIT_LAST_MANDATORY
 from api.models import Question, QuestionNumberCounter, User, UserAnswer
 
 
@@ -88,7 +89,7 @@ class SplitMandatoryQuestionsTests(TestCase):
 
         self.assertEqual(
             Question.objects.filter(is_mandatory=True).values('question_number').distinct().count(),
-            len(mq.MANDATORY_QUESTION_NUMBERS),
+            SPLIT_LAST_MANDATORY,
         )
 
     def test_split_questions_stop_being_grouped(self):
