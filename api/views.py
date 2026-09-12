@@ -554,12 +554,26 @@ class UserViewSet(viewsets.ModelViewSet):
     # ----- Picture gallery (up to UserPicture.MAX_PER_USER per user) -----
 
     def _resync_primary_photo(self, user):
-        """Set user.profile_photo to the URL of the order=0 picture (or None if no pictures)."""
+        """Set user.profile_photo to the URL of the order=0 picture (or None if no pictures).
+
+        Emits a primary_photo_changed activity when one photo replaces another as primary. A
+        first photo is already announced by photo_added, and removing the last one is not news.
+        """
         primary = user.pictures.order_by('order', 'created_at').first()
         new_url = primary.image_url if primary else None
         if user.profile_photo != new_url:
+            previous_url = user.profile_photo
             user.profile_photo = new_url
             user.save(update_fields=['profile_photo'])
+            if previous_url and primary:
+                try:
+                    FeedActivity.objects.create(
+                        user=user,
+                        kind='primary_photo_changed',
+                        payload={'image_url': new_url, 'picture_id': str(primary.id)},
+                    )
+                except Exception as e:
+                    logger.warning(f'Could not record primary_photo_changed activity: {e}')
 
     @action(detail=True, methods=['get', 'post'], url_path='pictures')
     def pictures(self, request, pk=None):
@@ -635,7 +649,16 @@ class UserViewSet(viewsets.ModelViewSet):
             picture = user.pictures.get(id=picture_id)
         except UserPicture.DoesNotExist:
             return Response({'error': 'Picture not found'}, status=status.HTTP_404_NOT_FOUND)
+        picture_id_str = str(picture.id)
         picture.delete()
+        # Take the photo out of the feed as well; its activity otherwise kept showing a photo
+        # the person had already removed.
+        try:
+            FeedActivity.objects.filter(
+                user=user, kind__in=PHOTO_ACTIVITY_KINDS, payload__picture_id=picture_id_str,
+            ).delete()
+        except Exception as e:
+            logger.warning(f'Could not remove feed activity for deleted picture: {e}')
         # Reflow orders to keep them contiguous
         remaining = list(user.pictures.order_by('order', 'created_at'))
         for new_order, pic in enumerate(remaining):
@@ -3206,6 +3229,7 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
                         kind='question_answered',
                         payload={
                             'question_id': qid_str,
+                            'question_number': question.question_number,
                             'question_text': question.text or '',
                         },
                     )
@@ -5047,6 +5071,45 @@ FEED_GROUP_WINDOW = timedelta(hours=2)
 # without shipping an unbounded list for someone who answers hundreds in a sitting.
 FEED_GROUP_PAYLOAD_LIMIT = 25
 
+# Activities that show one of the person's gallery pictures, keyed by payload['picture_id'].
+PHOTO_ACTIVITY_KINDS = ('photo_added', 'primary_photo_changed')
+
+
+def _drop_deleted_photo_activities(activities):
+    """Drop photo activities whose picture has since been deleted.
+
+    Deleting a picture removes its activities, but rows written before that cleanup existed
+    would otherwise keep showing a photo the person took down.
+    """
+    def picture_id(activity):
+        return (activity.payload or {}).get('picture_id')
+
+    picture_ids = {picture_id(a) for a in activities if a.kind in PHOTO_ACTIVITY_KINDS} - {None}
+    if not picture_ids:
+        return activities
+    live_ids = {
+        str(pk) for pk in UserPicture.objects.filter(id__in=picture_ids).values_list('id', flat=True)
+    }
+    return [
+        a for a in activities
+        if a.kind not in PHOTO_ACTIVITY_KINDS or picture_id(a) is None or picture_id(a) in live_ids
+    ]
+
+
+def _attach_question_numbers(payloads):
+    """Fill question_number into question_answered payloads recorded before it was stored."""
+    missing = [p for p in payloads if p.get('question_id') and p.get('question_number') is None]
+    if not missing:
+        return
+    numbers = {
+        str(pk): number
+        for pk, number in Question.objects.filter(
+            id__in={p['question_id'] for p in missing}
+        ).values_list('id', 'question_number')
+    }
+    for payload in missing:
+        payload['question_number'] = numbers.get(payload['question_id'])
+
 
 def _group_feed_activities(activities):
     """Collapse runs of same-user, same-kind activity into one entry each.
@@ -5090,6 +5153,7 @@ def _activity_visibility_filter(viewer):
     per_kind = [
         ('bio_updated', 'feed_visibility_bio'),
         ('photo_added', 'feed_visibility_photo'),
+        ('primary_photo_changed', 'feed_visibility_photo'),
         ('question_answered', 'feed_visibility_question'),
     ]
     kind_q = Q()
@@ -5157,6 +5221,7 @@ class FeedView(viewsets.ViewSet):
         WINDOW = page * page_size + 50
         posts = list(posts_qs.order_by('-created_at')[:WINDOW])
         acts = list(acts_qs.order_by('-created_at')[:WINDOW]) if include_activities else []
+        acts = _drop_deleted_photo_activities(acts)
 
         # Roll same-person bursts into one entry each before paginating, so a grouped burst
         # occupies one slot rather than filling the page.
@@ -5186,6 +5251,11 @@ class FeedView(viewsets.ViewSet):
                         member.payload or {} for member in members[:FEED_GROUP_PAYLOAD_LIMIT]
                     ]
                 results.append({'kind': obj.kind, 'created_at': created_at, 'activity': activity})
+        _attach_question_numbers([
+            payload
+            for item in results if item['kind'] == 'question_answered'
+            for payload in [item['activity']['payload'], *item['activity'].get('group_payloads', [])]
+        ])
         return Response({
             'results': results, 'has_next': has_next, 'page': page,
             'audience': audience, 'q': q, 'hashtag': hashtag,

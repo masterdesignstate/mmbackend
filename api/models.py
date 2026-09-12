@@ -582,6 +582,7 @@ class FeedActivity(models.Model):
     KIND_CHOICES = [
         ('bio_updated', 'Bio updated'),
         ('photo_added', 'Photo added'),
+        ('primary_photo_changed', 'Primary photo changed'),
         ('question_answered', 'Question answered'),
     ]
 
