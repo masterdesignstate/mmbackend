@@ -352,11 +352,16 @@ def user_personal_details(request):
             age = today.year - date_of_birth.year - ((today.month, today.day) < (date_of_birth.month, date_of_birth.day))
             print(f"🎂 Calculated age: {age}")
 
-            # Validate age (must be 18+)
+            # Validate age (18-80, the same range the results age filter spans)
             if age < 18:
                 print(f"❌ User too young: {age} years old")
                 return JsonResponse({
                     'error': 'User must be at least 18 years old'
+                }, status=400)
+            if age > 80:
+                print(f"❌ User over the age limit: {age} years old")
+                return JsonResponse({
+                    'error': 'User must be 80 years old or younger'
                 }, status=400)
 
             print(f"✅ Age validation passed: {age} years old")
