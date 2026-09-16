@@ -5,6 +5,7 @@ from django.db import transaction
 from django.db.models import Q, Count, Exists, OuterRef
 from django.utils import timezone
 from django.conf import settings
+from django.core.exceptions import ValidationError as DjangoValidationError
 from datetime import timedelta
 import logging
 import time
@@ -3373,33 +3374,73 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def undo_question(self, request):
-        """Delete all answers for a specific question_number for a user (non-mandatory only)"""
+        """Clear a user's answer to a question.
+
+        With ``question_number``, delete every answer for that number (non-mandatory only).
+        With ``question_id`` for an option of a grouped question (Ethnicity, Education, Ideology,
+        ...), delete just that option's answer. A mandatory grouped question is satisfied by any
+        one answered option, so this is allowed as long as another option stays answered.
+        """
         user_id = request.data.get('user_id')
         question_number = request.data.get('question_number')
+        question_id = request.data.get('question_id')
 
-        if not user_id or question_number is None:
-            return Response({'error': 'user_id and question_number are required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not user_id or (question_number is None and not question_id):
+            return Response(
+                {'error': 'user_id and question_number or question_id are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             user = User.objects.get(id=user_id)
-        except User.DoesNotExist:
+        except (User.DoesNotExist, ValueError, DjangoValidationError):
             return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Check that the question exists and is not mandatory
-        questions_for_number = Question.objects.filter(question_number=question_number)
-        if not questions_for_number.exists():
-            return Response({'error': 'Question not found'}, status=status.HTTP_404_NOT_FOUND)
+        if question_id:
+            try:
+                question = Question.objects.get(id=question_id)
+            except (Question.DoesNotExist, ValueError, DjangoValidationError):
+                return Response({'error': 'Question not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        if questions_for_number.filter(is_mandatory=True).exists():
-            return Response({'error': 'Cannot undo mandatory questions'}, status=status.HTTP_400_BAD_REQUEST)
+            if question.question_type != 'grouped':
+                return Response(
+                    {'error': 'Only an option of a grouped question can be cleared on its own'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-        # Delete all answers for this question_number
-        answers = UserAnswer.objects.filter(user=user, question__question_number=question_number)
-        deleted_count = answers.count()
-        answers.delete()
+            answers = UserAnswer.objects.filter(user=user, question=question)
+            if not answers.exists():
+                return Response({'error': 'No answer to clear'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Clean up UserRequiredQuestion for these questions
-        UserRequiredQuestion.objects.filter(user=user, question__question_number=question_number).delete()
+            if question.is_mandatory:
+                other_answers = UserAnswer.objects.filter(
+                    user=user, question__question_number=question.question_number
+                ).exclude(question=question)
+                if not other_answers.exists():
+                    return Response(
+                        {'error': 'Keep at least one answer for this question'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+            deleted_count = answers.count()
+            answers.delete()
+            UserRequiredQuestion.objects.filter(user=user, question=question).delete()
+        else:
+            # Check that the question exists and is not mandatory
+            questions_for_number = Question.objects.filter(question_number=question_number)
+            if not questions_for_number.exists():
+                return Response({'error': 'Question not found'}, status=status.HTTP_404_NOT_FOUND)
+
+            if questions_for_number.filter(is_mandatory=True).exists():
+                return Response({'error': 'Cannot undo mandatory questions'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Delete all answers for this question_number
+            answers = UserAnswer.objects.filter(user=user, question__question_number=question_number)
+            deleted_count = answers.count()
+            answers.delete()
+
+            # Clean up UserRequiredQuestion for these questions
+            UserRequiredQuestion.objects.filter(user=user, question__question_number=question_number).delete()
 
         self._sync_answered_count(user)
 
