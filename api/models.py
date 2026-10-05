@@ -59,6 +59,11 @@ class User(AbstractUser):
         default=False,
         help_text="If true, other users can only like this user after answering all of this user's required questions",
     )
+    require_approval_for_likes = models.BooleanField(
+        default=True,
+        db_default=True,
+        help_text="If true, other users can only like this user after this user has approved (or liked) them",
+    )
     share_answers = models.CharField(
         max_length=16, choices=FEED_VISIBILITY_CHOICES, default='none',
         help_text="Who can see this user's looking-for answers on answers they share.",

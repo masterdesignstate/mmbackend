@@ -3601,6 +3601,21 @@ class UserResultViewSet(viewsets.ModelViewSet):
                 'result_user_id': str(result_user_id)
             })
         else:
+            # Gate: if tag is 'like' and the target user requires approval before likes,
+            # block the new like unless the target has approved (or liked) the liker.
+            if tag == 'like' and getattr(result_user, 'require_approval_for_likes', True):
+                target_approved_liker = UserResult.objects.filter(
+                    user=result_user, result_user=user, tag__in=['approve', 'like']
+                ).exists()
+                if not target_approved_liker:
+                    return Response(
+                        {
+                            'error': 'approval_required',
+                            'message': 'This user needs to approve you before you can like them.'
+                        },
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+
             # Gate: if tag is 'like' and the target user requires answered required questions,
             # block the new like unless the liker has answered all of target's required questions.
             if tag == 'like' and getattr(result_user, 'require_answers_for_likes', False):

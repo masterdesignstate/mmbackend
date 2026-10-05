@@ -384,6 +384,7 @@ class DummyReciprocationTests(TestCase):
         self.target.require_answers_for_likes = True
         self.target.save(update_fields=["require_answers_for_likes"])
         UserRequiredQuestion.objects.create(user=self.target, question=self.question)
+        UserResult.objects.create(user=self.target, result_user=self.real, tag="approve")
 
         with patch("api.services.dummy_activity._stable_percent", return_value=0):
             response = self._toggle(self.real, self.target, "Like")
@@ -403,3 +404,45 @@ class DummyReciprocationTests(TestCase):
 
         self.assertEqual(response.status_code, 201)
         self.assertTrue(UserResult.objects.filter(user=self.real, result_user=self.target, tag="like").exists())
+
+    def test_like_blocked_until_target_approves(self):
+        with patch("api.services.dummy_activity._stable_percent", return_value=100):
+            response = self._toggle(self.real, self.target, "Like")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.data["error"], "approval_required")
+        self.assertFalse(UserResult.objects.filter(user=self.real, result_user=self.target, tag="like").exists())
+
+        UserResult.objects.create(user=self.target, result_user=self.real, tag="approve")
+        with patch("api.services.dummy_activity._stable_percent", return_value=100):
+            response = self._toggle(self.real, self.target, "Like")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(UserResult.objects.filter(user=self.real, result_user=self.target, tag="like").exists())
+
+    def test_like_allowed_when_target_liked_first(self):
+        UserResult.objects.create(user=self.target, result_user=self.real, tag="like")
+
+        with patch("api.services.dummy_activity._stable_percent", return_value=100):
+            response = self._toggle(self.real, self.target, "Like")
+
+        self.assertEqual(response.status_code, 201)
+
+    def test_like_allowed_without_approval_when_target_disabled_it(self):
+        self.target.require_approval_for_likes = False
+        self.target.save(update_fields=["require_approval_for_likes"])
+
+        with patch("api.services.dummy_activity._stable_percent", return_value=100):
+            response = self._toggle(self.real, self.target, "Like")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(UserResult.objects.filter(user=self.real, result_user=self.target, tag="like").exists())
+
+    def test_removing_like_is_never_blocked_by_approval(self):
+        UserResult.objects.create(user=self.real, result_user=self.target, tag="like")
+
+        response = self._toggle(self.real, self.target, "Like")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["action"], "removed")
+        self.assertFalse(UserResult.objects.filter(user=self.real, result_user=self.target, tag="like").exists())

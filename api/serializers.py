@@ -163,7 +163,7 @@ class UserSerializer(serializers.ModelSerializer):
             'is_online', 'last_active', 'questions_answered_count', 'online_status', 'question_answers',
             'date_joined', 'is_banned', 'is_admin', 'email_verified', 'email_verified_at', 'mandatory_questions_complete',
             'restriction_type', 'restriction_duration', 'restriction_reason', 'restriction_reason_detail', 'restriction_date',
-            'require_answers_for_likes', 'share_answers',
+            'require_answers_for_likes', 'require_approval_for_likes', 'share_answers',
             'feed_visibility_bio', 'feed_visibility_photo', 'feed_visibility_question',
             'note_visibility',
             'importance_exclusion_values',
@@ -461,7 +461,7 @@ class SimpleUserSerializer(serializers.ModelSerializer):
             'id', 'username', 'email', 'first_name', 'last_name',
             'profile_photo', 'age', 'date_of_birth', 'height',
             'from_location', 'live', 'tagline', 'bio', 'is_online', 'last_active', 'is_admin', 'email_verified',
-            'require_answers_for_likes', 'share_answers', 'pictures', 'profile_prompts',
+            'require_answers_for_likes', 'require_approval_for_likes', 'share_answers', 'pictures', 'profile_prompts',
         ]
 
     def get_is_online(self, obj):
