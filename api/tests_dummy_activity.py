@@ -446,3 +446,105 @@ class DummyReciprocationTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["action"], "removed")
         self.assertFalse(UserResult.objects.filter(user=self.real, result_user=self.target, tag="like").exists())
+
+
+class DummyApprovalAdminTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username="admin", email="admin@example.com", password="pass123", is_admin=True,
+        )
+        self.real = User.objects.create_user(
+            username="realuser", email="real@example.com", password="pass123",
+        )
+        self.dummy_flag = User.objects.create_user(
+            username="flagdummy", email="flagdummy@example.com", password="pass123", is_dummy=True,
+        )
+        self.dummy_email = User.objects.create_user(
+            username="emaildummy", email=f"emaildummy@{DUMMY_EMAIL_DOMAIN}", password="pass123",
+        )
+        self.dummy_banned = User.objects.create_user(
+            username="banneddummy", email="banned@example.com", password="pass123",
+            is_dummy=True, is_banned=True,
+        )
+
+    def test_non_admin_is_rejected(self):
+        response = self.client.get("/api/users/dummy_approval/", {"user_id": str(self.real.id)})
+        self.assertEqual(response.status_code, 403)
+
+        response = self.client.post(
+            "/api/users/dummy_approval/",
+            {"user_id": str(self.real.id), "require_approval_for_likes": False},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+        response = self.client.post(
+            f"/api/users/{self.dummy_flag.id}/set_approval/",
+            {"require_approval_for_likes": False},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+        self.dummy_flag.refresh_from_db()
+        self.assertTrue(self.dummy_flag.require_approval_for_likes)
+
+    def test_bulk_update_only_touches_dummies(self):
+        response = self.client.post(
+            "/api/users/dummy_approval/",
+            {"user_id": str(self.admin.id), "require_approval_for_likes": False},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["updated"], 3)
+        self.assertEqual(response.data["total"], 3)
+        self.assertEqual(response.data["approval_on"], 0)
+        self.assertEqual(response.data["approval_off"], 3)
+
+        for dummy in (self.dummy_flag, self.dummy_email, self.dummy_banned):
+            dummy.refresh_from_db()
+            self.assertFalse(dummy.require_approval_for_likes)
+        self.real.refresh_from_db()
+        self.assertTrue(self.real.require_approval_for_likes)
+
+        response = self.client.get("/api/users/dummy_approval/", {"user_id": str(self.admin.id)})
+        self.assertEqual(response.data, {"total": 3, "approval_on": 0, "approval_off": 3})
+
+    def test_bulk_update_rejects_non_bool(self):
+        response = self.client.post(
+            "/api/users/dummy_approval/",
+            {"user_id": str(self.admin.id), "require_approval_for_likes": "no"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_set_approval_on_banned_user(self):
+        response = self.client.post(
+            f"/api/users/{self.dummy_banned.id}/set_approval/",
+            {"user_id": str(self.admin.id), "require_approval_for_likes": False},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.dummy_banned.refresh_from_db()
+        self.assertFalse(self.dummy_banned.require_approval_for_likes)
+
+    def test_admin_profiles_exposes_dummy_and_approval(self):
+        response = self.client.get("/api/users/admin_profiles/")
+        rows = {row["username"]: row for row in response.data}
+        self.assertFalse(rows["realuser"]["is_dummy"])
+        self.assertTrue(rows["flagdummy"]["is_dummy"])
+        self.assertTrue(rows["emaildummy"]["is_dummy"])
+        self.assertTrue(rows["realuser"]["require_approval_for_likes"])
+
+    def test_migration_turns_approval_off_for_dummies_only(self):
+        import importlib
+
+        from django.apps import apps
+
+        migration = importlib.import_module("api.migrations.0073_dummy_users_approval_off")
+        migration.dummies_approval_off(apps, None)
+
+        for dummy in (self.dummy_flag, self.dummy_email, self.dummy_banned):
+            dummy.refresh_from_db()
+            self.assertFalse(dummy.require_approval_for_likes)
+        self.real.refresh_from_db()
+        self.assertTrue(self.real.require_approval_for_likes)

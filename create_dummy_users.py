@@ -338,6 +338,7 @@ def create_dummy_users(count=100):
             last_name=last_name,
             email=email,
             is_dummy=True,
+            require_approval_for_likes=False,
             age=age,
             date_of_birth=birth_date,
             height=height,

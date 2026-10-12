@@ -1588,6 +1588,7 @@ class Command(BaseCommand):
                     username=import_row.username,
                     email=f"{import_row.username}@{DUMMY_EMAIL_DOMAIN}",
                     is_dummy=True,
+                    require_approval_for_likes=False,
                     password=make_password(None),
                     first_name=import_row.first_name,
                     last_name=import_row.last_name,

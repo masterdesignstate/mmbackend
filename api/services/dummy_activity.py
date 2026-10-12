@@ -90,6 +90,14 @@ def dummy_users_queryset():
     )
 
 
+def all_dummy_users_queryset():
+    """Every simulated account, including banned/inactive ones. For admin bulk
+    edits, where skipping a currently-banned dummy would leave it inconsistent."""
+    return User.objects.filter(
+        Q(is_dummy=True) | Q(email__iendswith=f"@{DUMMY_EMAIL_DOMAIN}"),
+    )
+
+
 def non_dummy_users_queryset():
     """Real signups. The required-question catch-up acts only on these, so the
     simulator never fabricates answers on a simulated profile.

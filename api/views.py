@@ -21,7 +21,12 @@ from .models import (
     PromptTemplate, UserProfilePrompt, PromptPollVote, RestrictedWord,
 )
 from .services.compatibility_service import CompatibilityService
-from .services.dummy_activity import create_user_result_with_notifications, simulate_dummy_reciprocation
+from .services.dummy_activity import (
+    DUMMY_EMAIL_DOMAIN,
+    all_dummy_users_queryset,
+    create_user_result_with_notifications,
+    simulate_dummy_reciprocation,
+)
 from .services.email_verification import apply_email_verification_restriction, send_verification_email
 from .analytics import capture as posthog_capture
 from .services.compatibility_queue import (
@@ -448,7 +453,8 @@ class UserViewSet(viewsets.ModelViewSet):
         # It must not apply to detail actions that operate on a single, known user:
         #
         #  - retrieve            so the frontend can detect the ban and show its overlay
-        #  - restrict / remove_restriction / destroy   moderation targets a banned user
+        #  - restrict / remove_restriction / destroy / set_approval
+        #        admin actions that may target a banned user (or the admin themself)
         #  - pictures / reorder_pictures / delete_picture / update_online_status
         #        these are self-service. A brand new signup is is_banned=True until they
         #        verify their email (see apply_email_verification_restriction), so
@@ -456,7 +462,7 @@ class UserViewSet(viewsets.ModelViewSet):
         #        onboarding — uploading a photo 404'd with "No User matches the given
         #        query" at exactly the moment they were asked to upload one.
         if self.action in [
-            'retrieve', 'restrict', 'remove_restriction', 'destroy',
+            'retrieve', 'restrict', 'remove_restriction', 'destroy', 'set_approval',
             'pictures', 'reorder_pictures', 'delete_picture', 'update_online_status',
         ]:
             return User.objects.prefetch_related('answers__question').all()
@@ -777,6 +783,7 @@ class UserViewSet(viewsets.ModelViewSet):
             'questions_answered_count', 'restriction_type', 'restriction_duration',
             'restriction_reason', 'restriction_reason_detail', 'restriction_date', 'profile_photo',
             'has_pending_reports', 'answered_question_count',
+            'is_dummy', 'require_approval_for_likes',
         ))
 
         answer_map = defaultdict(dict)
@@ -793,6 +800,10 @@ class UserViewSet(viewsets.ModelViewSet):
         for user in users:
             user['questions_answered_count'] = user.pop('answered_question_count')
             user['question_answers'] = answer_map.get(user['id'], {})
+            # Same rule as is_dummy_user(): the flag, or the legacy email domain.
+            user['is_dummy'] = user['is_dummy'] or (user['email'] or '').lower().endswith(
+                f'@{DUMMY_EMAIL_DOMAIN}'
+            )
 
         return Response(users)
 
@@ -857,6 +868,50 @@ class UserViewSet(viewsets.ModelViewSet):
         ).update(**update_fields)
 
         return Response({'status': 'restriction removed'})
+
+    @staticmethod
+    def _dummy_approval_counts():
+        dummies = all_dummy_users_queryset()
+        total = dummies.count()
+        approval_on = dummies.filter(require_approval_for_likes=True).count()
+        return {'total': total, 'approval_on': approval_on, 'approval_off': total - approval_on}
+
+    @action(detail=False, methods=['get', 'post'])
+    def dummy_approval(self, request):
+        """Admin only. GET: how many dummies require approval for likes.
+        POST {user_id, require_approval_for_likes}: set it on every dummy."""
+        if not _resolve_acting_admin(request):
+            return Response({'error': 'Admin only'}, status=status.HTTP_403_FORBIDDEN)
+
+        if request.method == 'GET':
+            return Response(self._dummy_approval_counts())
+
+        enabled = request.data.get('require_approval_for_likes')
+        if not isinstance(enabled, bool):
+            return Response(
+                {'error': 'require_approval_for_likes must be true or false'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        updated = all_dummy_users_queryset().update(require_approval_for_likes=enabled)
+        return Response({'updated': updated, **self._dummy_approval_counts()})
+
+    @action(detail=True, methods=['post'])
+    def set_approval(self, request, pk=None):
+        """Admin only. POST {user_id, require_approval_for_likes}: set it on one user.
+        user_id is the acting admin; the target is the user in the URL."""
+        if not _resolve_acting_admin(request):
+            return Response({'error': 'Admin only'}, status=status.HTTP_403_FORBIDDEN)
+
+        enabled = request.data.get('require_approval_for_likes')
+        if not isinstance(enabled, bool):
+            return Response(
+                {'error': 'require_approval_for_likes must be true or false'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        user = self.get_object()
+        user.require_approval_for_likes = enabled
+        user.save(update_fields=['require_approval_for_likes'])
+        return Response({'id': str(user.id), 'require_approval_for_likes': enabled})
 
     @action(detail=False, methods=['get'])
     def search(self, request):
