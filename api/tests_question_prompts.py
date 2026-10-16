@@ -89,6 +89,18 @@ class AnswerExclusionsEndpointTests(TestCase):
         self.assertEqual(rows[0]['blocked_values'], [3])
         self.assertEqual(rows[0]['value_labels']['5'], 'Daily')
 
+    def test_all_lists_every_answer_that_can_be_excluded_on(self):
+        UserAnswer.objects.create(
+            user=self.user, question=self.question, me_answer=3, looking_for_answer=3, excluded_answer_values=[1],
+        )
+        other = Question.objects.create(question_number=42, question_name='X', group_name='X', text='X?', is_approved=True)
+        UserAnswer.objects.create(user=self.user, question=other, me_answer=2, looking_for_answer=2)
+
+        rows = self.client.get('/api/answers/exclusions/', {'user': str(self.user.id), 'all': '1'}).data
+
+        self.assertEqual([row['question']['question_number'] for row in rows], [41, 42])
+        self.assertEqual(rows[1]['excluded_answer_values'], [])
+
 
 class BioLengthTests(TestCase):
     def test_edit_profile_keeps_a_3000_character_about_me(self):

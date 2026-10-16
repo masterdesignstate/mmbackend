@@ -3171,16 +3171,21 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
     def exclusions(self, request):
         """The user's answers that currently exclude someone from Results, for the filter panel.
 
-        Allowed and blocked values are worked out here so the panel offers exactly what
-        `update` will accept: the answer payload elsewhere omits a question's answer options.
+        With `all=1`, every answer that could carry an exclusion is listed, so the panel can
+        offer questions to start excluding on. Allowed and blocked values are worked out here
+        so the panel offers exactly what `update` will accept: the answer payload elsewhere
+        omits a question's answer options.
         """
         user_id = request.query_params.get('user')
         if not user_id:
             return Response({'error': 'user is required'}, status=status.HTTP_400_BAD_REQUEST)
+        include_all = request.query_params.get('all') in ('1', 'true')
 
+        answers = UserAnswer.objects.filter(user_id=user_id)
+        if not include_all:
+            answers = answers.exclude(excluded_answer_values=[])
         answers = (
-            UserAnswer.objects.filter(user_id=user_id)
-            .exclude(excluded_answer_values=[])
+            answers
             .select_related('question')
             .prefetch_related('question__answers')
             .order_by('question__question_number', 'question__group_number')
@@ -3194,7 +3199,8 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
                 drop_unsupported=True,
                 own_answer=answer.me_answer,
             )
-            if not excluded:
+            allowed = sorted(_allowed_excluded_answer_values_for_question(answer.question))
+            if not excluded and not (include_all and allowed):
                 continue
             blocked = [] if answer.me_open_to_all or answer.me_answer not in DEFAULT_EXCLUDED_ANSWER_VALUES else [answer.me_answer]
             rows.append({
@@ -3202,7 +3208,7 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
                 'question': LightQuestionSerializer(answer.question).data,
                 'me_answer': answer.me_answer,
                 'excluded_answer_values': excluded,
-                'allowed_values': sorted(_allowed_excluded_answer_values_for_question(answer.question)),
+                'allowed_values': allowed,
                 'blocked_values': blocked,
                 'value_labels': {
                     str(option.value): option.answer_text
