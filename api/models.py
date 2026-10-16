@@ -16,6 +16,8 @@ FEED_VISIBILITY_CHOICES = [
 
 class User(AbstractUser):
     """Extended User model for the dating app"""
+    MAX_BIO_LENGTH = 3000
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     profile_photo = models.URLField(max_length=500, null=True, blank=True)
     age = models.PositiveIntegerField(null=True, blank=True)
@@ -24,7 +26,7 @@ class User(AbstractUser):
     from_location = models.CharField(max_length=100, null=True, blank=True, help_text="Where the user is originally from")
     live = models.CharField(max_length=100, null=True, blank=True, help_text="Where the user currently lives")
     tagline = models.CharField(max_length=40, blank=True, help_text="Short tagline")
-    bio = models.TextField(max_length=280, blank=True)
+    bio = models.TextField(max_length=MAX_BIO_LENGTH, blank=True)
     last_active = models.DateTimeField(default=timezone.now)
     is_banned = models.BooleanField(default=False)
     email_verified = models.BooleanField(default=False)
@@ -964,13 +966,14 @@ class RestrictedWord(models.Model):
 
 
 class Notification(models.Model):
-    """Notifications for user actions (approve, like, match, notes, prompt polls)."""
+    """Notifications for user actions (approve, like, match, notes, prompt polls, question prompts)."""
     NOTIFICATION_TYPE_CHOICES = [
         ('approve', 'Approve'),
         ('like', 'Like'),
         ('match', 'Match'),
         ('note', 'Note'),
         ('prompt_poll', 'Prompt Poll'),
+        ('question_prompt', 'Question Prompt'),
     ]
 
     # Cap on user-authored notes sent with a like. Admin broadcasts use a
@@ -991,6 +994,14 @@ class Notification(models.Model):
         null=True,
         blank=True,
         related_name='notifications',
+    )
+    related_question = models.ForeignKey(
+        Question,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='notifications',
+        help_text="For question_prompt: the question the sender asked the recipient to answer.",
     )
 
     class Meta:

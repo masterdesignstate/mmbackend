@@ -283,7 +283,7 @@ def user_personal_details(request):
     - height: Height in feet and inches format (e.g., "5' 11"")
     - from: User's original location
     - live: User's current city
-    - bio: User's bio (max 160 chars)
+    - bio: User's About Me text (max User.MAX_BIO_LENGTH chars)
     
     Returns:
     - success: Boolean indicating success
@@ -458,7 +458,7 @@ def user_personal_details(request):
         user.from_location = data.get('from')
         user.live = data.get('live')
         user.tagline = data.get('tagline', '')[:40]  # Limit to 40 characters
-        user.bio = data.get('bio', '')[:160]  # Limit to 160 characters
+        user.bio = data.get('bio', '')[:User.MAX_BIO_LENGTH]
         
         print(f"📝 User data updates:")
         print(f"   First name: '{old_first_name}' → '{user.first_name}'")

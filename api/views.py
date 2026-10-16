@@ -3167,6 +3167,51 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
         )
         return Response({'answered_question_numbers': sorted(numbers)})
 
+    @action(detail=False, methods=['get'], url_path='exclusions')
+    def exclusions(self, request):
+        """The user's answers that currently exclude someone from Results, for the filter panel.
+
+        Allowed and blocked values are worked out here so the panel offers exactly what
+        `update` will accept: the answer payload elsewhere omits a question's answer options.
+        """
+        user_id = request.query_params.get('user')
+        if not user_id:
+            return Response({'error': 'user is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        answers = (
+            UserAnswer.objects.filter(user_id=user_id)
+            .exclude(excluded_answer_values=[])
+            .select_related('question')
+            .prefetch_related('question__answers')
+            .order_by('question__question_number', 'question__group_number')
+        )
+        from .serializers import LightQuestionSerializer
+        rows = []
+        for answer in answers:
+            excluded = _normalize_excluded_answer_values(
+                answer.excluded_answer_values,
+                question=answer.question,
+                drop_unsupported=True,
+                own_answer=answer.me_answer,
+            )
+            if not excluded:
+                continue
+            blocked = [] if answer.me_open_to_all or answer.me_answer not in DEFAULT_EXCLUDED_ANSWER_VALUES else [answer.me_answer]
+            rows.append({
+                'answer_id': str(answer.id),
+                'question': LightQuestionSerializer(answer.question).data,
+                'me_answer': answer.me_answer,
+                'excluded_answer_values': excluded,
+                'allowed_values': sorted(_allowed_excluded_answer_values_for_question(answer.question)),
+                'blocked_values': blocked,
+                'value_labels': {
+                    str(option.value): option.answer_text
+                    for option in answer.question.answers.all()
+                    if option.answer_text
+                },
+            })
+        return Response(rows)
+
     def create(self, request, *args, **kwargs):
         """
         Custom create method to handle user_id and question_id
@@ -4380,6 +4425,67 @@ class NotificationViewSet(viewsets.ModelViewSet):
 
         return Response({'status': 'all notifications marked as read'})
 
+    @action(detail=False, methods=['post'], url_path='prompt_question')
+    def prompt_question(self, request):
+        """Ask another user to answer a question.
+
+        Body: recipient_id, question_number, and user_id (the sender) when there is no session.
+        Re-prompting while an earlier prompt for the same question is still unread is a no-op,
+        so repeated taps cannot stack notifications.
+        """
+        sender, _ = _resolve_viewer(request)
+        if not sender:
+            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        recipient_id = request.data.get('recipient_id')
+        try:
+            question_number = int(request.data.get('question_number'))
+        except (TypeError, ValueError):
+            return Response({'error': 'question_number is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not recipient_id:
+            return Response({'error': 'recipient_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            recipient = User.objects.get(id=recipient_id, is_banned=False)
+        except (User.DoesNotExist, DjangoValidationError, ValueError):
+            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+        if recipient.id == sender.id:
+            return Response({'error': 'You cannot prompt yourself.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Grouped questions share a number across several rows; any one identifies the question.
+        question = (
+            Question.objects.filter(question_number=question_number, is_approved=True)
+            .order_by('group_number', 'id')
+            .first()
+        )
+        if not question:
+            return Response({'error': 'Question not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if UserAnswer.objects.filter(user=recipient, question__question_number=question_number).exists():
+            return Response(
+                {'error': 'already_answered', 'message': 'They have already answered this question.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        already_prompted = Notification.objects.filter(
+            recipient=recipient,
+            sender=sender,
+            notification_type='question_prompt',
+            related_question__question_number=question_number,
+            is_read=False,
+        ).exists()
+        # Someone who hid the sender doesn't hear from them; the sender sees the same success.
+        hidden_by_recipient = UserResult.objects.filter(user=recipient, result_user=sender, tag='hide').exists()
+        if not already_prompted and not hidden_by_recipient:
+            Notification.objects.create(
+                recipient=recipient,
+                sender=sender,
+                notification_type='question_prompt',
+                related_question=question,
+            )
+
+        return Response({'status': 'prompted', 'already_prompted': already_prompted})
+
 
 class ConversationViewSet(viewsets.ModelViewSet):
     """ViewSet for managing conversations between users"""
@@ -5280,10 +5386,52 @@ def _activity_visibility_filter(viewer):
     return Q(user_id=viewer.id) | kind_q  # author always sees own activities
 
 
+FEED_PEOPLE_LIMIT = 8
+
+
+def _feed_people_matching(allowed_ids, q):
+    """Users among `allowed_ids` whose name or username matches the feed search `q`.
+
+    Ranked exact username, then prefix matches, then anything containing the term, so typing
+    "lucy" puts @lucy ahead of @mlucyfer.
+    """
+    term = q.lstrip('@').strip()
+    if not term:
+        return []
+    name_q = (
+        Q(username__icontains=term)
+        | Q(first_name__icontains=term)
+        | Q(last_name__icontains=term)
+    )
+    first, _, rest = term.partition(' ')
+    if rest.strip():
+        name_q |= Q(first_name__icontains=first, last_name__icontains=rest.strip())
+
+    candidates = list(
+        User.objects.filter(id__in=allowed_ids, is_banned=False)
+        .filter(name_q)
+        .only('id', 'username', 'first_name', 'last_name', 'profile_photo')[:200]
+    )
+    lowered = term.lower()
+
+    def rank(user):
+        username = (user.username or '').lower()
+        full_name = f'{user.first_name or ""} {user.last_name or ""}'.strip().lower()
+        if username == lowered or full_name == lowered or (user.first_name or '').lower() == lowered:
+            return 0
+        if username.startswith(lowered) or full_name.startswith(lowered):
+            return 1
+        return 2
+
+    candidates.sort(key=lambda user: (rank(user), (user.first_name or user.username or '').lower()))
+    return candidates
+
+
 class FeedView(viewsets.ViewSet):
     """GET /api/feed/ — feed list. Query params:
     - audience: all|matches|approved|liked (viewer's filter)
-    - q: free-text search across post body
+    - q: free-text search across post body, plus authors' names and usernames. When it matches
+      people, their posts and activity are included and `people` lists them (page 1 only).
     - hashtag: filter posts by hashtag
     - page, page_size
     """
@@ -5313,21 +5461,25 @@ class FeedView(viewsets.ViewSet):
         if not allowed_ids:
             return Response({'results': [], 'has_next': False, 'page': page, 'audience': audience})
 
+        matched_people = _feed_people_matching(allowed_ids, q) if q and not author_id else []
+        matched_author_ids = [person.id for person in matched_people]
+
         posts_qs = Post.objects.filter(is_deleted=False, author_id__in=allowed_ids) \
             .filter(_post_visibility_filter(viewer)) \
             .select_related('author').prefetch_related('images', 'hashtags', 'reactions', 'comments')
         if q:
-            posts_qs = posts_qs.filter(body__icontains=q)
+            posts_qs = posts_qs.filter(Q(body__icontains=q) | Q(author_id__in=matched_author_ids))
         if hashtag:
             posts_qs = posts_qs.filter(hashtags__tag=hashtag).distinct()
 
         acts_qs = FeedActivity.objects.none() if author_id else (
-            FeedActivity.objects.filter(user_id__in=allowed_ids)
+            FeedActivity.objects.filter(user_id__in=matched_author_ids if q else allowed_ids)
             .filter(_activity_visibility_filter(viewer))
             .select_related('user')
         )
-        # Search and hashtag filters only apply to posts; if either is set, hide activities entirely.
-        include_activities = not author_id and not q and not hashtag
+        # Activities carry no text to match, so a search only shows those of the people it
+        # matched, and a hashtag filter (posts only) hides them entirely.
+        include_activities = not author_id and not hashtag and (not q or bool(matched_author_ids))
 
         WINDOW = page * page_size + 50
         posts = list(posts_qs.order_by('-created_at')[:WINDOW])
@@ -5367,9 +5519,20 @@ class FeedView(viewsets.ViewSet):
             for item in results if item['kind'] == 'question_answered'
             for payload in [item['activity']['payload'], *item['activity'].get('group_payloads', [])]
         ])
+        people = [
+            {
+                'id': str(person.id),
+                'username': person.username,
+                'first_name': person.first_name,
+                'last_name': person.last_name,
+                'profile_photo': person.profile_photo,
+            }
+            for person in matched_people
+            if person.id != viewer.id
+        ][:FEED_PEOPLE_LIMIT] if page == 1 else []
         return Response({
             'results': results, 'has_next': has_next, 'page': page,
-            'audience': audience, 'q': q, 'hashtag': hashtag,
+            'audience': audience, 'q': q, 'hashtag': hashtag, 'people': people,
         })
 
     @action(detail=False, methods=['get'], url_path='hashtags')

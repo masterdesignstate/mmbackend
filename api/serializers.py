@@ -536,13 +536,14 @@ class NotificationSerializer(serializers.ModelSerializer):
     sender = SimpleUserSerializer(read_only=True)
     recipient = SimpleUserSerializer(read_only=True)
     related_prompt_poll_vote = PromptPollVoteSerializer(read_only=True)
+    related_question = LightQuestionSerializer(read_only=True)
 
     class Meta:
         model = Notification
         fields = [
             'id', 'recipient', 'sender', 'notification_type', 'note',
             'is_read', 'created_at', 'related_user_result',
-            'related_prompt_poll_vote',
+            'related_prompt_poll_vote', 'related_question',
         ]
         read_only_fields = ['id', 'created_at']
 
