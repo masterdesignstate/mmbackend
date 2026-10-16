@@ -1069,7 +1069,11 @@ class AzureUploader:
     @classmethod
     def from_environment(cls):
         connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-        account_name = os.getenv("AZURE_ACCOUNT_NAME", getattr(settings, "AZURE_ACCOUNT_NAME", ""))
+        account_name = (
+            os.getenv("AZURE_ACCOUNT_NAME")
+            or os.getenv("NEXT_PUBLIC_STORAGE_NAME")
+            or getattr(settings, "AZURE_ACCOUNT_NAME", "")
+        )
         account_key = os.getenv("AZURE_ACCOUNT_KEY", getattr(settings, "AZURE_ACCOUNT_KEY", ""))
         container_name = (
             os.getenv("AZURE_CONTAINER")
@@ -1091,6 +1095,12 @@ class AzureUploader:
 
         if connection_string:
             client = BlobServiceClient.from_connection_string(connection_string)
+            return cls(client, container_name, sas_token)
+
+        if account_name and not account_key and sas_token:
+            # A write-enabled SAS token (the frontend's) is enough to upload without the account key.
+            account_url = f"https://{account_name}.blob.core.windows.net"
+            client = BlobServiceClient(account_url=account_url, credential=sas_token.lstrip("?"))
             return cls(client, container_name, sas_token)
 
         if not account_name or not account_key:
