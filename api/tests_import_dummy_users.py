@@ -76,7 +76,7 @@ class ImportDummyUsersTests(TestCase):
                   "Spiritual", "Atheist", "Agnostic", "Nonspiritual", "Hindu"]
         for group, name in enumerate(faiths, start=1):
             self.create_question(mq.FAITH, name, group, values=[1, 5])
-        for group, name in enumerate(["Left", "Right", "Moderate", "Non-binary", "Anarchist", "Apolitical"], start=1):
+        for group, name in enumerate(["Left", "Right", "Moderate", "Independent", "Anarchist", "Apolitical"], start=1):
             self.create_question(mq.IDEOLOGY, name, group)
 
     def test_resolve_genders_requires_exact_500_500_split(self):

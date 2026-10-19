@@ -41,7 +41,7 @@ IDEOLOGY_WEIGHTS = {
     'Left': 28,
     'Right': 26,
     'Apolitical': 8,
-    'Non-binary': 2,
+    'Independent': 2,
     'Anarchist': 2,
 }
 WEIGHTS_BY_NUMBER = {mq.FAITH: FAITH_WEIGHTS, mq.IDEOLOGY: IDEOLOGY_WEIGHTS}
