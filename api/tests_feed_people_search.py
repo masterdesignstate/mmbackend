@@ -47,3 +47,18 @@ class FeedPeopleSearchTests(TestCase):
 
     def test_viewer_is_not_listed_among_people(self):
         self.assertEqual(self._search('viewer')['people'], [])
+
+    def test_selecting_a_person_shows_their_posts_and_updates_and_keeps_people(self):
+        data = self.client.get('/api/feed/', {'q': 'lucy', 'author_id': str(self.lucy.id)}).data
+
+        bodies = {item['post']['body'] for item in data['results'] if item['kind'] == 'post'}
+        self.assertEqual(bodies, {'Weekend hike photos'})
+        activity_users = {item['activity']['user']['id'] for item in data['results'] if item['kind'] == 'bio_updated'}
+        self.assertEqual(activity_users, {str(self.lucy.id)})
+        self.assertEqual([person['id'] for person in data['people']], [str(self.lucy.id)])
+
+    def test_author_without_a_search_returns_posts_only(self):
+        data = self.client.get('/api/feed/', {'author_id': str(self.lucy.id)}).data
+
+        self.assertEqual([item['kind'] for item in data['results']], ['post'])
+        self.assertEqual(data['people'], [])

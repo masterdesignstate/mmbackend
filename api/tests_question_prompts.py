@@ -14,6 +14,7 @@ class QuestionPromptTests(TestCase):
             question_number=40, question_name='Coffee', group_name='Coffee', text='Do you drink coffee?',
             is_approved=True,
         )
+        UserAnswer.objects.create(user=self.sender, question=self.question, me_answer=3, looking_for_answer=3)
         self.client = APIClient()
         self.client.force_authenticate(self.sender)
 
@@ -40,6 +41,17 @@ class QuestionPromptTests(TestCase):
 
         self.assertTrue(response.data['already_prompted'])
         self.assertEqual(Notification.objects.filter(recipient=self.recipient).count(), 1)
+
+    def test_cannot_prompt_a_question_you_have_not_answered(self):
+        other = Question.objects.create(
+            question_number=41, question_name='Tea', group_name='Tea', text='Tea?', is_approved=True,
+        )
+
+        response = self._prompt(question_number=other.question_number)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['error'], 'not_answered')
+        self.assertFalse(Notification.objects.exists())
 
     def test_cannot_prompt_for_an_answered_question(self):
         QuestionAnswer.objects.create(question=self.question, value='1', answer_text='Never', order=0)
@@ -76,7 +88,7 @@ class AnswerExclusionsEndpointTests(TestCase):
 
     def test_lists_only_answers_with_exclusions_and_their_allowed_values(self):
         UserAnswer.objects.create(
-            user=self.user, question=self.question, me_answer=3, looking_for_answer=3, excluded_answer_values=[1, 5],
+            user=self.user, question=self.question, me_answer=2, looking_for_answer=5, excluded_answer_values=[1, 5],
         )
         other = Question.objects.create(question_number=42, question_name='X', group_name='X', text='X?', is_approved=True)
         UserAnswer.objects.create(user=self.user, question=other, me_answer=2, looking_for_answer=2)
@@ -84,9 +96,9 @@ class AnswerExclusionsEndpointTests(TestCase):
         rows = self.client.get('/api/answers/exclusions/', {'user': str(self.user.id)}).data
 
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]['excluded_answer_values'], [1, 5])
+        self.assertEqual(rows[0]['excluded_answer_values'], [1])
         self.assertEqual(rows[0]['allowed_values'], [1, 3, 5])
-        self.assertEqual(rows[0]['blocked_values'], [3])
+        self.assertEqual(rows[0]['blocked_values'], [5])
         self.assertEqual(rows[0]['value_labels']['5'], 'Daily')
 
     def test_all_lists_every_answer_that_can_be_excluded_on(self):

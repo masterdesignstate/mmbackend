@@ -171,12 +171,36 @@ def _normalize_importance_exclusion_values(value, drop_unsupported=False):
     return normalized
 
 
+def _exclusion_blocked_value(question, me_answer, me_open_to_all, looking_for_answer, looking_for_open_to_all):
+    """The value a viewer cannot exclude: their Them answer.
+
+    Relationship has no Them side, so that question blocks the Me answer instead.
+    Open to all means they did not pick a value, so nothing is blocked.
+    """
+    if getattr(question, 'question_number', None) == mq.RELATIONSHIP:
+        return None if me_open_to_all else me_answer
+    return None if looking_for_open_to_all else looking_for_answer
+
+
+def _exclusion_blocked_for_answer(answer):
+    return _exclusion_blocked_value(
+        answer.question,
+        answer.me_answer,
+        answer.me_open_to_all,
+        answer.looking_for_answer,
+        answer.looking_for_open_to_all,
+    )
+
+
 def _apply_answer_exclusions(compatibilities, current_user):
     excluded_by_question = {}
     current_answers = UserAnswer.objects.filter(user=current_user).select_related('question').only(
         'question_id',
         'excluded_answer_values',
         'me_answer',
+        'me_open_to_all',
+        'looking_for_answer',
+        'looking_for_open_to_all',
         'question__question_number',
         'question__question_name',
         'question__group_number',
@@ -187,7 +211,7 @@ def _apply_answer_exclusions(compatibilities, current_user):
             answer.excluded_answer_values,
             question=answer.question,
             drop_unsupported=True,
-            own_answer=answer.me_answer,
+            own_answer=_exclusion_blocked_for_answer(answer),
         )
         if excluded_values:
             excluded_by_question[answer.question_id] = excluded_values
@@ -3193,16 +3217,17 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
         from .serializers import LightQuestionSerializer
         rows = []
         for answer in answers:
+            blocked_value = _exclusion_blocked_for_answer(answer)
             excluded = _normalize_excluded_answer_values(
                 answer.excluded_answer_values,
                 question=answer.question,
                 drop_unsupported=True,
-                own_answer=answer.me_answer,
+                own_answer=blocked_value,
             )
             allowed = sorted(_allowed_excluded_answer_values_for_question(answer.question))
             if not excluded and not (include_all and allowed):
                 continue
-            blocked = [] if answer.me_open_to_all or answer.me_answer not in DEFAULT_EXCLUDED_ANSWER_VALUES else [answer.me_answer]
+            blocked = [blocked_value] if blocked_value in DEFAULT_EXCLUDED_ANSWER_VALUES else []
             rows.append({
                 'answer_id': str(answer.id),
                 'question': LightQuestionSerializer(answer.question).data,
@@ -3275,7 +3300,13 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
                 excluded_answer_values = _normalize_excluded_answer_values(
                     request.data.get('excluded_answer_values', []),
                     question=question,
-                    own_answer=me_answer,
+                    own_answer=_exclusion_blocked_value(
+                        question,
+                        me_answer,
+                        me_open_to_all,
+                        looking_for_answer,
+                        looking_for_open_to_all,
+                    ),
                 )
             except ValueError as e:
                 return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -3427,7 +3458,7 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
                     instance.excluded_answer_values = _normalize_excluded_answer_values(
                         data.get('excluded_answer_values'),
                         question=instance.question,
-                        own_answer=instance.me_answer,
+                        own_answer=_exclusion_blocked_for_answer(instance),
                     )
                 except ValueError as e:
                     return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -4467,6 +4498,12 @@ class NotificationViewSet(viewsets.ModelViewSet):
         if not question:
             return Response({'error': 'Question not found'}, status=status.HTTP_404_NOT_FOUND)
 
+        if not UserAnswer.objects.filter(user=sender, question__question_number=question_number).exists():
+            return Response(
+                {'error': 'not_answered', 'message': 'Answer this question before you can request it.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         if UserAnswer.objects.filter(user=recipient, question__question_number=question_number).exists():
             return Response(
                 {'error': 'already_answered', 'message': 'They have already answered this question.'},
@@ -5438,6 +5475,8 @@ class FeedView(viewsets.ViewSet):
     - audience: all|matches|approved|liked (viewer's filter)
     - q: free-text search across post body, plus authors' names and usernames. When it matches
       people, their posts and activity are included and `people` lists them (page 1 only).
+    - author_id: limit posts to that person. With `q`, also include their updates and still
+      return the people the search matched, so a tapped person filters the feed.
     - hashtag: filter posts by hashtag
     - page, page_size
     """
@@ -5460,32 +5499,46 @@ class FeedView(viewsets.ViewSet):
         except (TypeError, ValueError):
             page, page_size = 1, 20
 
+        audience_ids = _resolve_audience_user_ids(viewer, audience)
         if author_id:
-            allowed_ids = list(User.objects.filter(id=author_id, is_banned=False).values_list('id', flat=True))
+            content_ids = list(User.objects.filter(id=author_id, is_banned=False).values_list('id', flat=True))
         else:
-            allowed_ids = _resolve_audience_user_ids(viewer, audience)
-        if not allowed_ids:
-            return Response({'results': [], 'has_next': False, 'page': page, 'audience': audience})
+            content_ids = audience_ids
+        if not content_ids:
+            return Response({'results': [], 'has_next': False, 'page': page, 'audience': audience, 'people': []})
 
-        matched_people = _feed_people_matching(allowed_ids, q) if q and not author_id else []
+        # Keep the people row after one person is selected, so another tap can switch the feed.
+        matched_people = _feed_people_matching(audience_ids, q) if q else []
         matched_author_ids = [person.id for person in matched_people]
 
-        posts_qs = Post.objects.filter(is_deleted=False, author_id__in=allowed_ids) \
+        posts_qs = Post.objects.filter(is_deleted=False, author_id__in=content_ids) \
             .filter(_post_visibility_filter(viewer)) \
             .select_related('author').prefetch_related('images', 'hashtags', 'reactions', 'comments')
-        if q:
+        # A selected person shows every post of theirs, even when the search text is only their name.
+        if q and not author_id:
             posts_qs = posts_qs.filter(Q(body__icontains=q) | Q(author_id__in=matched_author_ids))
         if hashtag:
             posts_qs = posts_qs.filter(hashtags__tag=hashtag).distinct()
 
-        acts_qs = FeedActivity.objects.none() if author_id else (
-            FeedActivity.objects.filter(user_id__in=matched_author_ids if q else allowed_ids)
-            .filter(_activity_visibility_filter(viewer))
-            .select_related('user')
-        )
-        # Activities carry no text to match, so a search only shows those of the people it
-        # matched, and a hashtag filter (posts only) hides them entirely.
-        include_activities = not author_id and not hashtag and (not q or bool(matched_author_ids))
+        if author_id and q:
+            acts_qs = (
+                FeedActivity.objects.filter(user_id__in=content_ids)
+                .filter(_activity_visibility_filter(viewer))
+                .select_related('user')
+            )
+            include_activities = not hashtag
+        elif author_id:
+            acts_qs = FeedActivity.objects.none()
+            include_activities = False
+        else:
+            acts_qs = (
+                FeedActivity.objects.filter(user_id__in=matched_author_ids if q else content_ids)
+                .filter(_activity_visibility_filter(viewer))
+                .select_related('user')
+            )
+            # Activities carry no text to match, so a search only shows those of the people it
+            # matched, and a hashtag filter (posts only) hides them entirely.
+            include_activities = not hashtag and (not q or bool(matched_author_ids))
 
         WINDOW = page * page_size + 50
         posts = list(posts_qs.order_by('-created_at')[:WINDOW])
