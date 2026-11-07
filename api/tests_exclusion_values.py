@@ -3,6 +3,7 @@ from django.test import TestCase
 from api import mandatory_questions as mq
 from api.models import Compatibility, Question, QuestionAnswer, User, UserAnswer
 from api.views import (
+    _apply_answer_exclusions,
     _apply_importance_exclusions,
     _allowed_excluded_answer_values_for_question,
     _normalize_importance_exclusion_values,
@@ -211,3 +212,65 @@ class ImportanceExclusionTests(TestCase):
         )
 
         self.assertIn(pair.id, filtered_ids)
+
+
+class AnswerExclusionPageTests(TestCase):
+    def test_answer_exclusion_slice_keeps_the_page_full(self):
+        question = Question.objects.create(
+            question_number=mq.ALCOHOL,
+            question_name='Alcohol',
+            group_name='Test',
+            text='How often do you drink?',
+            is_approved=True,
+        )
+        for index, value in enumerate([1, 2, 3, 4, 5]):
+            QuestionAnswer.objects.create(
+                question=question,
+                value=str(value),
+                answer_text=str(value),
+                order=index,
+            )
+        current_user = User.objects.create_user(
+            username='viewer',
+            email='viewer@example.com',
+            password='password',
+        )
+        UserAnswer.objects.create(
+            user=current_user,
+            question=question,
+            me_answer=3,
+            looking_for_answer=3,
+            excluded_answer_values=[1],
+        )
+        others = []
+        for index, score in enumerate((90, 80, 70)):
+            other = User.objects.create_user(
+                username=f'candidate{index}',
+                email=f'candidate{index}@example.com',
+                password='password',
+            )
+            UserAnswer.objects.create(
+                user=other,
+                question=question,
+                me_answer=1 if index == 1 else 3,
+                looking_for_answer=3,
+            )
+            Compatibility.objects.create(
+                user1=current_user,
+                user2=other,
+                overall_compatibility=score,
+                compatible_with_me=score,
+                im_compatible_with=score,
+                mutual_questions_count=1,
+            )
+            others.append(other)
+
+        page = list(
+            _apply_answer_exclusions(
+                Compatibility.objects.filter(user1=current_user).order_by('-overall_compatibility'),
+                current_user,
+            )[:2]
+        )
+
+        self.assertEqual(len(page), 2)
+        self.assertEqual([row.user2_id for row in page], [others[0].id, others[2].id])

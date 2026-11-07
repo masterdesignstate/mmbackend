@@ -223,13 +223,19 @@ def _apply_answer_exclusions(compatibilities, current_user):
     for question_id, excluded_values in excluded_by_question.items():
         candidate_answer_filter |= Q(question_id=question_id, me_answer__in=excluded_values)
 
-    excluded_user_ids = UserAnswer.objects.filter(candidate_answer_filter).exclude(
-        user=current_user
-    ).values_list('user_id', flat=True).distinct()
+    # Materialize the ids. A distinct() subquery inside exclude(Q | Q) can be planned so the
+    # page LIMIT runs before those users drop out, which leaves a short page and an empty slot.
+    excluded_user_ids = list(
+        UserAnswer.objects.filter(candidate_answer_filter).exclude(
+            user=current_user
+        ).values_list('user_id', flat=True).distinct()
+    )
+    if not excluded_user_ids:
+        return compatibilities
 
     return compatibilities.exclude(
-        Q(user1=current_user, user2__id__in=excluded_user_ids) |
-        Q(user2=current_user, user1__id__in=excluded_user_ids)
+        Q(user1=current_user, user2_id__in=excluded_user_ids) |
+        Q(user2=current_user, user1_id__in=excluded_user_ids)
     )
 
 
@@ -251,16 +257,20 @@ def _apply_importance_exclusions(compatibilities, current_user):
     if not critical_question_ids:
         return compatibilities
 
-    excluded_user_ids = UserAnswer.objects.filter(
-        question_id__in=critical_question_ids,
-        looking_for_importance__in=excluded_importance_values,
-    ).exclude(
-        user=current_user
-    ).values_list('user_id', flat=True).distinct()
+    excluded_user_ids = list(
+        UserAnswer.objects.filter(
+            question_id__in=critical_question_ids,
+            looking_for_importance__in=excluded_importance_values,
+        ).exclude(
+            user=current_user
+        ).values_list('user_id', flat=True).distinct()
+    )
+    if not excluded_user_ids:
+        return compatibilities
 
     return compatibilities.exclude(
-        Q(user1=current_user, user2__id__in=excluded_user_ids) |
-        Q(user2=current_user, user1__id__in=excluded_user_ids)
+        Q(user1=current_user, user2_id__in=excluded_user_ids) |
+        Q(user2=current_user, user1_id__in=excluded_user_ids)
     )
 
 
