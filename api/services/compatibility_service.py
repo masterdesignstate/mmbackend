@@ -5,6 +5,7 @@ from django.db.models import Q
 from django.core.cache import cache
 from django.db import IntegrityError
 from ..models import User, UserAnswer, UserRequiredQuestion, Compatibility, Controls
+from .active_limits import disabled_question_ids, scoring_version
 
 
 class CompatibilityService:
@@ -112,8 +113,8 @@ class CompatibilityService:
         if constants is None:
             constants = CompatibilityService.get_constants()
 
-        # Find mutual questions
-        mutual_question_ids = set(a1_map.keys()) & set(a2_map.keys())
+        # Find mutual questions. Disabled questions never count, whichever caller loaded the answers.
+        mutual_question_ids = (set(a1_map.keys()) & set(a2_map.keys())) - disabled_question_ids()
 
         if not mutual_question_ids:
             return 0.0, 0.0, 0.0, 0
@@ -207,7 +208,10 @@ class CompatibilityService:
 
         # Check cache first (different cache key for required_only/exclude_required)
         cache_suffix = "_required" if required_only else "_exclude_required" if exclude_required else ""
-        cache_key = f"compatibility_{min(user1.id, user2.id)}_{max(user1.id, user2.id)}{cache_suffix}"
+        cache_key = (
+            f"compatibility_{min(user1.id, user2.id)}_{max(user1.id, user2.id)}{cache_suffix}"
+            f"_v{scoring_version()}"
+        )
         cached_result = cache.get(cache_key)
         if cached_result:
             return cached_result
@@ -247,9 +251,10 @@ class CompatibilityService:
 
         constants = CompatibilityService.get_constants()
 
-        # Build answer dictionaries (all answers)
-        a1_all = {answer.question_id: answer for answer in user1_answers}
-        a2_all = {answer.question_id: answer for answer in user2_answers}
+        # Build answer dictionaries (all answers), leaving disabled questions out
+        disabled_ids = disabled_question_ids()
+        a1_all = {answer.question_id: answer for answer in user1_answers if answer.question_id not in disabled_ids}
+        a2_all = {answer.question_id: answer for answer in user2_answers if answer.question_id not in disabled_ids}
 
         # Calculate regular compatibility using helper
         compatible_with_me, im_compatible_with, overall_compatibility, mutual_count = \
@@ -272,6 +277,8 @@ class CompatibilityService:
             user2_required_qids = set(
                 UserRequiredQuestion.objects.filter(user=user2).values_list('question_id', flat=True)
             )
+        user1_required_qids = set(user1_required_qids) - disabled_ids
+        user2_required_qids = set(user2_required_qids) - disabled_ids
 
         if not user1_required_qids and not user2_required_qids:
             # No per-user required: required scores equal overall, completeness 1.0
@@ -420,6 +427,7 @@ class CompatibilityService:
         # Get all other user IDs to clear caches
         other_user_ids = list(User.objects.exclude(id=user.id).values_list('id', flat=True))
         cleared = 0
+        version = scoring_version()
 
         for other_id in other_user_ids:
             # Build cache keys for both orderings and all suffixes
@@ -427,7 +435,7 @@ class CompatibilityService:
             base_key = f"compatibility_{user_ids[0]}_{user_ids[1]}"
 
             for suffix in ['', '_required', '_exclude_required']:
-                cache_key = f"{base_key}{suffix}"
+                cache_key = f"{base_key}{suffix}_v{version}"
                 if cache.get(cache_key) is not None:
                     cache.delete(cache_key)
                     cleared += 1
@@ -435,17 +443,29 @@ class CompatibilityService:
         return cleared
 
     @staticmethod
-    def recalculate_all_compatibilities(user: User, use_full_reset: bool = True) -> int:
+    def recalculate_all_compatibilities(
+        user: User,
+        use_full_reset: bool = True,
+        *,
+        other_users: Optional[List[User]] = None,
+        answers_by_user: Optional[Dict[str, List[UserAnswer]]] = None,
+        required_by_user: Optional[Dict[str, set]] = None,
+    ) -> int:
         """
         Recalculate all compatibilities for a user (useful when their answers change)
         Now also computes required compatibility scores.
         Returns the number of compatibilities updated
+
+        A batch rescore can pass other_users, answers_by_user and required_by_user (keyed by
+        str(user.id), including this user) so they are loaded once rather than per user.
         """
         print(f"🔄 Starting compatibility recalculation for user {user.username} ({user.id})", flush=True)
+        preloaded = answers_by_user is not None
 
-        # Clear cache first to ensure fresh calculations
-        cache_cleared = CompatibilityService.clear_user_compatibility_cache(user)
-        print(f"   🗑️  Cleared {cache_cleared} cached entries", flush=True)
+        if not preloaded:
+            # Clear cache first to ensure fresh calculations
+            cache_cleared = CompatibilityService.clear_user_compatibility_cache(user)
+            print(f"   🗑️  Cleared {cache_cleared} cached entries", flush=True)
 
         if use_full_reset:
             deleted_count = Compatibility.objects.filter(
@@ -454,16 +474,34 @@ class CompatibilityService:
             print(f"   🗑️  Deleted {deleted_count} existing compatibility records (full reset)", flush=True)
 
         # Get all other users
-        other_users = list(User.objects.exclude(id=user.id).exclude(is_banned=True))
+        if other_users is None:
+            other_users = list(User.objects.exclude(id=user.id).exclude(is_banned=True).exclude(is_disabled=True))
         if not other_users:
             print(f"   ⚠️  No other users found to calculate compatibility with", flush=True)
             return 0
 
         print(f"   👥 Calculating compatibility with {len(other_users)} other users...", flush=True)
 
-        # Fetch user answers (required sets come from UserRequiredQuestion)
-        user_answers = list(
-            user.answers.select_related('question').only(
+        if preloaded:
+            user_answers = answers_by_user.get(str(user.id), [])
+        else:
+            # Fetch user answers (required sets come from UserRequiredQuestion)
+            user_answers = list(
+                user.answers.filter(question__is_disabled=False).select_related('question').only(
+                    'question_id',
+                    'me_answer',
+                    'me_open_to_all',
+                    'me_importance',
+                    'looking_for_answer',
+                    'looking_for_open_to_all',
+                    'looking_for_importance',
+                )
+            )
+
+            other_answers = UserAnswer.objects.filter(
+                user__in=other_users, question__is_disabled=False,
+            ).select_related('question').only(
+                'user_id',
                 'question_id',
                 'me_answer',
                 'me_open_to_all',
@@ -472,22 +510,10 @@ class CompatibilityService:
                 'looking_for_open_to_all',
                 'looking_for_importance',
             )
-        )
 
-        other_answers = UserAnswer.objects.filter(user__in=other_users).select_related('question').only(
-            'user_id',
-            'question_id',
-            'me_answer',
-            'me_open_to_all',
-            'me_importance',
-            'looking_for_answer',
-            'looking_for_open_to_all',
-            'looking_for_importance',
-        )
-
-        answers_by_user: dict[str, list[UserAnswer]] = {}
-        for answer in other_answers:
-            answers_by_user.setdefault(str(answer.user_id), []).append(answer)
+            answers_by_user = {}
+            for answer in other_answers:
+                answers_by_user.setdefault(str(answer.user_id), []).append(answer)
 
         existing_comps = Compatibility.objects.filter(
             Q(user1=user) | Q(user2=user)
@@ -512,6 +538,8 @@ class CompatibilityService:
                 other_user,
                 user1_answers=user_answers,
                 user2_answers=other_answers_list,
+                user1_required_qids=required_by_user.get(str(user.id), set()) if required_by_user is not None else None,
+                user2_required_qids=required_by_user.get(str(other_user.id), set()) if required_by_user is not None else None,
             )
 
             key_direct = (str(user.id), str(other_user.id))

@@ -49,6 +49,19 @@ class User(AbstractUser):
             "accounts it may act on."
         ),
     )
+    is_disabled = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text=(
+            "Hidden from results, search, feed and messaging, and unable to sign in. "
+            "Set by apply_active_limits; separate from is_active so it can be undone."
+        ),
+    )
+    results_filters = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="The Results filters this user last applied.",
+    )
     ban_reason = models.TextField(blank=True)
     ban_date = models.DateTimeField(null=True, blank=True)
     restriction_type = models.CharField(max_length=20, null=True, blank=True, help_text="temporary or permanent")
@@ -199,6 +212,11 @@ class Question(models.Model):
                                     related_name='submitted_questions', 
                                     help_text="User who submitted this question")
     is_approved = models.BooleanField(default=False, help_text="Whether the question is approved for use")
+    is_disabled = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Hidden from users and left out of compatibility. Set by apply_active_limits.",
+    )
     skip_me = models.BooleanField(default=False, help_text="Whether to skip asking about me")
     skip_looking_for = models.BooleanField(default=False, help_text="Whether to skip asking about what I'm looking for")
     open_to_all_me = models.BooleanField(default=False, help_text="Whether I'm open to all options")
@@ -339,6 +357,28 @@ class UserRequiredQuestion(models.Model):
 
     def __str__(self):
         return f"{self.user.username} requires {self.question.text[:30]}"
+
+
+class SavedResultFilter(models.Model):
+    """A named Results filter setup the user can reapply."""
+    MAX_PER_USER = 20
+    MAX_NAME_LENGTH = 40
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='saved_result_filters')
+    name = models.CharField(max_length=MAX_NAME_LENGTH)
+    filters = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'name'], name='saved_result_filter_unique_name'),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username}: {self.name}"
 
 
 class Compatibility(models.Model):

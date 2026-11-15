@@ -29,7 +29,7 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS('🚀 Starting compatibility pre-calculation...'))
 
         # Get all active users with answers
-        users = User.objects.exclude(is_banned=True).filter(
+        users = User.objects.exclude(is_banned=True).exclude(is_disabled=True).filter(
             answers__isnull=False
         ).distinct()
 

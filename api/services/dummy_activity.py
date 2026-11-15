@@ -87,6 +87,7 @@ def dummy_users_queryset():
         Q(is_dummy=True) | Q(email__iendswith=f"@{DUMMY_EMAIL_DOMAIN}"),
         is_active=True,
         is_banned=False,
+        is_disabled=False,
     )
 
 
@@ -243,13 +244,13 @@ def _answer_values_for_question(question):
 
 def _choose_question(seed):
     questions = list(
-        Question.objects.filter(is_approved=True, is_mandatory=False)
+        Question.objects.filter(is_approved=True, is_mandatory=False, is_disabled=False)
         .prefetch_related("answers")
         .order_by("question_number", "group_number", "question_name", "id")
     )
     if not questions:
         questions = list(
-            Question.objects.filter(is_approved=True)
+            Question.objects.filter(is_approved=True, is_disabled=False)
             .prefetch_related("answers")
             .order_by("question_number", "group_number", "question_name", "id")
         )
@@ -459,7 +460,7 @@ def _answer_all_required_questions_for_user(user, *, day_start, now, dry_run=Fal
         return []
 
     questions = list(
-        Question.objects.filter(id__in=pending_qids)
+        Question.objects.filter(id__in=pending_qids, is_disabled=False)
         .prefetch_related("answers")
         .order_by("question_number", "group_number", "question_name", "id")
     )

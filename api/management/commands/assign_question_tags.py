@@ -4,9 +4,12 @@ import re
 
 from django.core.cache import cache
 from django.core.management.base import BaseCommand, CommandError
-from django.db.models import Count
+from django.db.models import Count, F
 
 from api.models import Question, Tag
+
+# Non-mandatory questions past this count keep no tags.
+OPTIONAL_TAG_LIMIT = 600
 
 VALID_TAGS = ('value', 'lifestyle', 'look', 'trait', 'hobby', 'interest')
 DEFAULT_DATA_FILE = os.path.join(
@@ -68,10 +71,11 @@ def _keyword_tags(text):
 
 
 class Command(BaseCommand):
-    help = 'Fill empty question tag sets from the bonus catalog, then from keywords. Existing tags are left alone.'
+    help = 'Tag the first 600 non-mandatory questions. Later optional questions have their tags cleared. Mandatory questions are not changed.'
 
     def add_arguments(self, parser):
         parser.add_argument('--file', default=DEFAULT_DATA_FILE)
+        parser.add_argument('--limit', type=int, default=OPTIONAL_TAG_LIMIT)
         parser.add_argument('--dry-run', action='store_true')
 
     def handle(self, *args, **options):
@@ -93,54 +97,49 @@ class Command(BaseCommand):
         if missing:
             raise CommandError(f'Missing tag rows: {", ".join(missing)}. Run setup_database.py first.')
 
-        # Empty tag sets, plus rows whose only tags sit outside the six filters
-        # (family, career) and so never match a tag pill.
-        untagged = (
-            Question.objects.annotate(tag_count=Count('tags'))
-            .filter(tag_count=0)
-            .order_by('question_number', 'id')
-        )
-        standard = set(VALID_TAGS)
-        outside = [
-            question for question in Question.objects.prefetch_related('tags').order_by('question_number', 'id')
-            if question.tags.exists() and not {tag.name for tag in question.tags.all()} & standard
-        ]
-
-        from_catalog = 0
-        from_keywords = 0
-        still_open = 0
+        limit = options['limit']
         dry_run = options['dry_run']
+        # Question number order, with unnumbered rows last, so the 600 are the earliest optional questions.
+        optional = list(
+            Question.objects.filter(is_mandatory=False)
+            .annotate(tag_count=Count('tags'))
+            .order_by(F('question_number').asc(nulls_last=True), 'id')
+        )
+        keep = optional[:limit]
+        rest = optional[limit:]
 
         def choose_tags(question):
             return catalog.get((question.text or '').strip()) or _keyword_tags(
                 ' '.join(part for part in (question.text, question.question_name, question.group_name) if part)
             )
 
-        for question in untagged.iterator():
+        filled = 0
+        already = 0
+        still_open = 0
+        for question in keep:
+            if question.tag_count:
+                already += 1
+                continue
             names = choose_tags(question)
             if not names:
                 still_open += 1
                 continue
-            if names == catalog.get((question.text or '').strip()):
-                from_catalog += 1
-            else:
-                from_keywords += 1
+            filled += 1
             if not dry_run:
                 question.tags.set([tag_rows[name] for name in names])
 
-        # Keep family/career. Add a standard tag so the question also matches a filter pill.
-        for question in outside:
-            names = choose_tags(question)
-            if not names:
-                still_open += 1
+        cleared = 0
+        for question in rest:
+            if not question.tag_count:
                 continue
-            from_keywords += 1
+            cleared += 1
             if not dry_run:
-                question.tags.add(*[tag_rows[name] for name in names])
+                question.tags.clear()
 
-        if not dry_run and (from_catalog or from_keywords):
+        if not dry_run and (filled or cleared):
             cache.delete('questions_metadata_v2')
 
         self.stdout.write(
-            f'catalog={from_catalog} keywords={from_keywords} still_untagged={still_open} dry_run={dry_run}'
+            f'kept={already} filled={filled} cleared={cleared} still_open={still_open} '
+            f'limit={limit} dry_run={dry_run}'
         )

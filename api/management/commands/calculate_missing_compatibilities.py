@@ -59,10 +59,10 @@ class Command(BaseCommand):
 
             user = job.user
 
-            if user.is_banned:
+            if user.is_banned or user.is_disabled:
                 skipped_jobs += 1
                 job.status = CompatibilityJob.STATUS_COMPLETED
-                job.error_message = 'User is banned; skipping compatibility generation'
+                job.error_message = 'User is banned or disabled; skipping compatibility generation'
                 job.save(update_fields=['status', 'error_message', 'updated_at'])
                 continue
 

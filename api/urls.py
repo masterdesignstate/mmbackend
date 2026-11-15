@@ -6,7 +6,7 @@ from .views import (
     PictureModerationViewSet, UserReportViewSet, UserTagViewSet, StatsViewSet, ControlsViewSet, NotificationViewSet, ConversationViewSet,
     PostViewSet, PostCommentViewSet, FeedView,
     PromptTemplateViewSet, UserProfilePromptViewSet,
-    RestrictedWordViewSet,
+    RestrictedWordViewSet, SavedResultFilterViewSet,
 )
 from .function_views import (
     user_signup, user_personal_details, user_login, check_user_exists, check_onboarding_status, update_profile_photo, upload_photo, test_endpoint, delete_question,
@@ -20,6 +20,7 @@ router.register(r'tags', TagViewSet, basename='tag')
 router.register(r'questions', QuestionViewSet, basename='question')
 router.register(r'answers', UserAnswerViewSet, basename='answer')
 router.register(r'user-required-questions', UserRequiredQuestionViewSet, basename='userrequiredquestion')
+router.register(r'saved-result-filters', SavedResultFilterViewSet, basename='savedresultfilter')
 router.register(r'compatibility', CompatibilityViewSet, basename='compatibility')
 router.register(r'results', UserResultViewSet, basename='result')
 router.register(r'user-tags', UserTagViewSet, basename='user-tag')

@@ -124,9 +124,9 @@ def _process_user_compatibility_worker(user_id: str) -> None:
                 user = job.user
                 answer_count = user.answers.count()
 
-                if user.is_banned:
+                if user.is_banned or user.is_disabled:
                     job.status = CompatibilityJob.STATUS_COMPLETED
-                    job.error_message = 'User is banned; skipping compatibility generation'
+                    job.error_message = 'User is banned or disabled; skipping compatibility generation'
                     job.save(update_fields=['status', 'error_message', 'updated_at'])
                     print(f"⏭️  Skipped compatibility recalculation for banned user {user.username} ({user.id})", flush=True)
                     break
@@ -244,11 +244,11 @@ def process_user_compatibility_immediately(user: User) -> dict:
             'error': f'User needs at least {MIN_MATCHABLE_ANSWERS} answers (has {answer_count})'
         }
 
-    if user.is_banned:
+    if user.is_banned or user.is_disabled:
         return {
             'success': False,
             'pairs_recalculated': 0,
-            'error': 'User is banned'
+            'error': 'User is banned or disabled'
         }
 
     try:

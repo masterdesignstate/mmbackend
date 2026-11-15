@@ -3,9 +3,10 @@ from .models import (
     User, UserRestrictionHistory, Tag, Question, UserAnswer, UserRequiredQuestion, Compatibility,
     UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, QuestionAnswer, Controls, Notification, Conversation,
     Post, PostImage, PostHashtag, PostRevision, PostReaction, PostComment, FeedActivity,
-    PromptTemplate, UserProfilePrompt, PromptPollVote, RestrictedWord,
+    PromptTemplate, UserProfilePrompt, PromptPollVote, RestrictedWord, SavedResultFilter,
 )
 from . import mandatory_questions as mq
+from .result_filters import clean_results_filters
 from .utils.admin_utils import profile_answer_key
 
 
@@ -328,6 +329,35 @@ class UserRequiredQuestionSerializer(serializers.ModelSerializer):
         model = UserRequiredQuestion
         fields = ['id', 'user', 'question', 'question_id', 'created_at']
         read_only_fields = ['id', 'user', 'created_at']
+
+
+class SavedResultFilterSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SavedResultFilter
+        fields = ['id', 'name', 'filters', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_name(self, value):
+        name = (value or '').strip()
+        if not name:
+            raise serializers.ValidationError('Name is required.')
+        if len(name) > SavedResultFilter.MAX_NAME_LENGTH:
+            raise serializers.ValidationError(
+                f'Name must be {SavedResultFilter.MAX_NAME_LENGTH} characters or fewer.'
+            )
+        user = self.context.get('owner')
+        clash = SavedResultFilter.objects.filter(user=user, name__iexact=name)
+        if self.instance:
+            clash = clash.exclude(id=self.instance.id)
+        if user and clash.exists():
+            raise serializers.ValidationError('You already have a saved filter with this name.')
+        return name
+
+    def validate_filters(self, value):
+        try:
+            return clean_results_filters(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc))
 
 
 class CompatibilitySerializer(serializers.ModelSerializer):

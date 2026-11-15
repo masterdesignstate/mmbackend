@@ -534,7 +534,7 @@ def user_login(request):
             return JsonResponse({'error': 'Email and password are required'}, status=400)
 
         candidate = User.objects.filter(email__iexact=email).first()
-        if candidate and not candidate.is_active:
+        if candidate and (not candidate.is_active or candidate.is_disabled):
             return JsonResponse({'error': 'User account is deactivated'}, status=403)
 
         user = authenticate(

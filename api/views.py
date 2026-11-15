@@ -2,7 +2,7 @@ from rest_framework import viewsets, permissions, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.db import transaction
-from django.db.models import Q, Count, Exists, OuterRef
+from django.db.models import Q, Count, Exists, OuterRef, Prefetch
 from django.utils import timezone
 from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -18,9 +18,10 @@ from .models import (
     UserResult, Message, PictureModeration, UserReport, UserOnlineStatus, UserTag, Controls,
     Notification, Conversation, UserPicture,
     Post, PostImage, PostHashtag, PostRevision, PostReaction, PostComment, FeedActivity,
-    PromptTemplate, UserProfilePrompt, PromptPollVote, RestrictedWord,
+    PromptTemplate, UserProfilePrompt, PromptPollVote, RestrictedWord, SavedResultFilter,
 )
 from .services.compatibility_service import CompatibilityService
+from .services import active_limits as active_limits_service
 from .services.dummy_activity import (
     DUMMY_EMAIL_DOMAIN,
     all_dummy_users_queryset,
@@ -42,8 +43,9 @@ from .serializers import (
     DetailedUserSerializer, DetailedQuestionSerializer, UserTagSerializer,
     SimpleUserSerializer, ControlsSerializer, NotificationSerializer, ConversationSerializer,
     PromptTemplateSerializer, UserProfilePromptSerializer, PromptPollVoteSerializer,
-    RestrictedWordSerializer,
+    RestrictedWordSerializer, SavedResultFilterSerializer,
 )
+from .result_filters import clean_results_filters
 from .permissions import IsDashboardAdmin
 from . import mandatory_questions as mq
 from .utils.admin_utils import profile_answer_key
@@ -194,7 +196,9 @@ def _exclusion_blocked_for_answer(answer):
 
 def _apply_answer_exclusions(compatibilities, current_user):
     excluded_by_question = {}
-    current_answers = UserAnswer.objects.filter(user=current_user).select_related('question').only(
+    current_answers = UserAnswer.objects.filter(
+        user=current_user, question__is_disabled=False,
+    ).select_related('question').only(
         'question_id',
         'excluded_answer_values',
         'me_answer',
@@ -251,6 +255,7 @@ def _apply_importance_exclusions(compatibilities, current_user):
         UserAnswer.objects.filter(
             user=current_user,
             looking_for_importance=5,
+            question__is_disabled=False,
         ).values_list('question_id', flat=True)
     )
 
@@ -499,11 +504,14 @@ class UserViewSet(viewsets.ModelViewSet):
             'retrieve', 'restrict', 'remove_restriction', 'destroy', 'set_approval',
             'pictures', 'reorder_pictures', 'delete_picture', 'update_online_status',
         ]:
-            return User.objects.prefetch_related('answers__question').all()
+            return User.objects.prefetch_related(Prefetch(
+                'answers',
+                queryset=UserAnswer.objects.filter(question__is_disabled=False).select_related('question'),
+            )).all()
 
         # For list/other actions, exclude banned users and current user
         queryset = User.objects.filter(
-            is_banned=False
+            is_banned=False, is_disabled=False,
         ).exclude(id=self.request.user.id)
 
         logger.info(f"UserViewSet.get_queryset() called. Request: {self.request.method} {self.request.path}")
@@ -929,6 +937,57 @@ class UserViewSet(viewsets.ModelViewSet):
         updated = all_dummy_users_queryset().update(require_approval_for_likes=enabled)
         return Response({'updated': updated, **self._dummy_approval_counts()})
 
+    @action(detail=False, methods=['get', 'put'], url_path='results_filters')
+    def results_filters(self, request):
+        """The viewer's last applied Results filters. GET returns them, PUT {filters} replaces them.
+        Kept off UserSerializer so one person's filters never ride along in another's profile."""
+        viewer, _ = _resolve_viewer(request)
+        if not viewer:
+            return Response({'error': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+        if request.method == 'GET':
+            return Response({'filters': viewer.results_filters or {}})
+        try:
+            cleaned = clean_results_filters(request.data.get('filters'))
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        viewer.results_filters = cleaned
+        viewer.save(update_fields=['results_filters'])
+        return Response({'filters': cleaned})
+
+    @action(detail=False, methods=['get', 'post'])
+    def active_limits(self, request):
+        """Admin only. GET: enabled and disabled dummy and question counts.
+        POST {user_id, dummies?, questions?}: keep the youngest N dummies and the first N
+        questions enabled, disable the rest, and rescore compatibility in the background."""
+        if not _resolve_acting_admin(request):
+            return Response({'error': 'Admin only'}, status=status.HTTP_403_FORBIDDEN)
+
+        if request.method == 'GET':
+            return Response(active_limits_service.active_limit_counts())
+
+        limits = {}
+        for key in ('dummies', 'questions'):
+            value = request.data.get(key)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                return Response(
+                    {'error': f'{key} must be a non-negative whole number'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            limits[key] = value
+        if not limits:
+            return Response({'error': 'Pass dummies and/or questions'}, status=status.HTTP_400_BAD_REQUEST)
+
+        result = {}
+        if 'dummies' in limits:
+            result['dummies'] = active_limits_service.apply_dummy_limit(limits['dummies'])
+        if 'questions' in limits:
+            result['questions'] = active_limits_service.apply_question_limit(limits['questions'])
+        active_limits_service.invalidate_question_state()
+        active_limits_service.recalculate_enabled_users_in_background()
+        return Response({**result, **active_limits_service.active_limit_counts(), 'rescoring': True})
+
     @action(detail=True, methods=['post'])
     def set_approval(self, request, pk=None):
         """Admin only. POST {user_id, require_approval_for_likes}: set it on one user.
@@ -968,7 +1027,8 @@ class UserViewSet(viewsets.ModelViewSet):
             Q(last_name__icontains=query) |
             Q(username__icontains=query) |
             Q(email__icontains=query),
-            is_banned=False
+            is_banned=False,
+            is_disabled=False,
         ).distinct()[:limit]
 
         serializer = self.get_serializer(users, many=True)
@@ -992,6 +1052,8 @@ class UserViewSet(viewsets.ModelViewSet):
                 return Response({'error': 'User not found'}, status=404)
         elif not request.user.is_authenticated:
             return Response({'error': 'Authentication required'}, status=401)
+        if request.user.is_disabled:
+            return Response({'error': 'User not found'}, status=404)
 
             # Get filter parameters
         compatibility_type = request.query_params.get('compatibility_type', 'overall_compatibility')
@@ -1175,6 +1237,11 @@ class UserViewSet(viewsets.ModelViewSet):
                         output_field=FloatField()
                     )
                 ).order_by('-their_completeness', '-compatibility_score', 'id')
+
+            compatibilities = compatibilities.exclude(
+                Q(user1=request.user, user2__is_disabled=True) |
+                Q(user2=request.user, user1__is_disabled=True)
+            )
 
             # Apply compatibility filters based on selected compatibility type
             if not apply_required_filter:
@@ -1449,7 +1516,9 @@ class UserViewSet(viewsets.ModelViewSet):
 
                 # Per-user required: from UserRequiredQuestion
                 current_user_required_qids = set(
-                    UserRequiredQuestion.objects.filter(user=request.user).values_list('question_id', flat=True)
+                    UserRequiredQuestion.objects.filter(
+                        user=request.user, question__is_disabled=False,
+                    ).values_list('question_id', flat=True)
                 )
 
                 missing_user_ids = []
@@ -1540,7 +1609,7 @@ class UserViewSet(viewsets.ModelViewSet):
 
                 # Per-user required: from UserRequiredQuestion
                 other_users_required_answered = UserRequiredQuestion.objects.filter(
-                    user_id__in=other_user_ids
+                    user_id__in=other_user_ids, question__is_disabled=False,
                 ).values_list('user_id', 'question_id')
 
                 other_user_required_qids = defaultdict(set)
@@ -1874,18 +1943,19 @@ class UserViewSet(viewsets.ModelViewSet):
             current_user_id = user_id
             other_user_id_val = other_user_id
 
+            disabled_qids = active_limits_service.disabled_question_ids()
             current_required_qids = set(
                 UserRequiredQuestion.objects.filter(user_id=current_user_id).values_list('question_id', flat=True)
-            )
+            ) - disabled_qids
             other_required_qids = set(
                 UserRequiredQuestion.objects.filter(user_id=other_user_id_val).values_list('question_id', flat=True)
-            )
+            ) - disabled_qids
             current_answered_qids = set(
                 UserAnswer.objects.filter(user_id=current_user_id).values_list('question_id', flat=True)
-            )
+            ) - disabled_qids
             other_answered_qids = set(
                 UserAnswer.objects.filter(user_id=other_user_id_val).values_list('question_id', flat=True)
-            )
+            ) - disabled_qids
             current_answers = list(
                 UserAnswer.objects.filter(user_id=current_user_id).select_related('question')
             )
@@ -2222,7 +2292,9 @@ class UserProfilePromptViewSet(viewsets.ReadOnlyModelViewSet):
         if not getattr(owner, 'require_answers_for_likes', False):
             return None
         required_qids = set(
-            UserRequiredQuestion.objects.filter(user=owner).values_list('question_id', flat=True)
+            UserRequiredQuestion.objects.filter(
+                user=owner, question__is_disabled=False,
+            ).values_list('question_id', flat=True)
         )
         if not required_qids:
             return None
@@ -2445,7 +2517,10 @@ class QuestionViewSet(viewsets.ModelViewSet):
             skip_user_answers = self.request.query_params.get('skip_user_answers', 'false').lower() == 'true'
             if not skip_user_answers:
                 # Only prefetch user_answers if we're actually going to serialize them
-                queryset = queryset.prefetch_related('user_answers__user', 'user_answers__question')
+                queryset = queryset.prefetch_related(Prefetch(
+                    'user_answers',
+                    queryset=UserAnswer.objects.filter(user__is_disabled=False).select_related('user', 'question'),
+                ))
 
         # Filter by is_approved=True by default (hide unapproved questions from public)
         # Allow override via query param for admin endpoints
@@ -2456,6 +2531,13 @@ class QuestionViewSet(viewsets.ModelViewSet):
         )
         if not include_unapproved:
             queryset = queryset.filter(is_approved=True)
+
+        include_disabled = (
+            self.request.query_params.get('include_disabled', 'false').lower() == 'true' or
+            self.action in ['update', 'partial_update', 'destroy']
+        )
+        if not include_disabled:
+            queryset = queryset.filter(is_disabled=False)
 
         # Filter by is_mandatory if specified
         is_mandatory = self.request.query_params.get('is_mandatory')
@@ -3002,7 +3084,9 @@ class QuestionViewSet(viewsets.ModelViewSet):
 
         # Get distinct question numbers using database aggregation (fast with index)
         # Only include approved questions
-        distinct_numbers = Question.objects.filter(is_approved=True).values('question_number').distinct().order_by('question_number')
+        distinct_numbers = Question.objects.filter(
+            is_approved=True, is_disabled=False,
+        ).values('question_number').distinct().order_by('question_number')
         question_numbers = [item['question_number'] for item in distinct_numbers]
         
         # Debug logging
@@ -3019,7 +3103,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
 
         # Group questions by question_number (only approved questions)
         questions_by_number = {}
-        questions = Question.objects.filter(is_approved=True).prefetch_related('user_answers')
+        questions = Question.objects.filter(is_approved=True, is_disabled=False).prefetch_related('user_answers')
 
         for question in questions:
             if question.question_number not in questions_by_number:
@@ -3063,7 +3147,7 @@ class QuestionViewSet(viewsets.ModelViewSet):
     def answer_counts(self, request):
         """Get answer counts for questions"""
         # Get all questions grouped by question_number
-        questions = Question.objects.all().order_by('question_number', 'group_number')
+        questions = Question.objects.filter(is_disabled=False).order_by('question_number', 'group_number')
 
         # Create a dictionary to store answer counts by question_number
         answer_counts = {}
@@ -3160,7 +3244,7 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
         return actual_count
 
     def get_queryset(self):
-        queryset = UserAnswer.objects.select_related(
+        queryset = UserAnswer.objects.filter(question__is_disabled=False, user__is_disabled=False).select_related(
             'question', 'user', 'question__submitted_by'
         ).prefetch_related(
             'question__tags', 'question__answers'
@@ -3195,7 +3279,7 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
         if not user_id:
             return Response({'answered_question_numbers': []})
         numbers = list(
-            UserAnswer.objects.filter(user_id=user_id)
+            UserAnswer.objects.filter(user_id=user_id, question__is_disabled=False)
             .values_list('question__question_number', flat=True)
             .distinct()
         )
@@ -3215,7 +3299,7 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
             return Response({'error': 'user is required'}, status=status.HTTP_400_BAD_REQUEST)
         include_all = request.query_params.get('all') in ('1', 'true')
 
-        answers = UserAnswer.objects.filter(user_id=user_id)
+        answers = UserAnswer.objects.filter(user_id=user_id, question__is_disabled=False)
         if not include_all:
             answers = answers.exclude(excluded_answer_values=[])
         answers = (
@@ -3281,7 +3365,7 @@ class UserAnswerViewSet(viewsets.ModelViewSet):
                 }, status=status.HTTP_400_BAD_REQUEST)
             
             try:
-                question = Question.objects.get(id=question_id)
+                question = Question.objects.get(id=question_id, is_disabled=False)
             except Question.DoesNotExist:
                 return Response({
                     'error': 'Question not found'
@@ -3607,10 +3691,11 @@ class UserRequiredQuestionViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user_id = self.request.query_params.get('user')
+        enabled = UserRequiredQuestion.objects.filter(question__is_disabled=False)
         if user_id:
-            return UserRequiredQuestion.objects.filter(user_id=user_id).select_related('question', 'user').order_by('id')
+            return enabled.filter(user_id=user_id).select_related('question', 'user').order_by('id')
         if self.request.user.is_authenticated:
-            return UserRequiredQuestion.objects.filter(user=self.request.user).select_related('question', 'user').order_by('id')
+            return enabled.filter(user=self.request.user).select_related('question', 'user').order_by('id')
         return UserRequiredQuestion.objects.none()
 
     def create(self, request, *args, **kwargs):
@@ -3627,7 +3712,7 @@ class UserRequiredQuestionViewSet(viewsets.ModelViewSet):
             except User.DoesNotExist:
                 return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
         try:
-            question = Question.objects.get(id=question_id)
+            question = Question.objects.get(id=question_id, is_disabled=False)
         except Question.DoesNotExist:
             return Response({'error': 'Question not found'}, status=status.HTTP_404_NOT_FOUND)
         obj, created = UserRequiredQuestion.objects.get_or_create(user=user, question=question)
@@ -3646,6 +3731,45 @@ class UserRequiredQuestionViewSet(viewsets.ModelViewSet):
         if (user.questions_answered_count or 0) >= MIN_MATCHABLE_ANSWERS:
             enqueue_user_for_recalculation(user, force=True)
             process_user_compatibility_async(str(user.id))
+
+
+class SavedResultFilterViewSet(viewsets.ModelViewSet):
+    """A user's named Results filter presets. The owner comes from the session or user_id,
+    the same way UserRequiredQuestionViewSet resolves it."""
+    serializer_class = SavedResultFilterSerializer
+    permission_classes = [permissions.AllowAny]
+    http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
+    pagination_class = None
+
+    def _owner(self):
+        if not hasattr(self, '_cached_owner'):
+            self._cached_owner, _ = _resolve_viewer(self.request)
+        return self._cached_owner
+
+    def get_queryset(self):
+        owner = self._owner()
+        if not owner:
+            return SavedResultFilter.objects.none()
+        return SavedResultFilter.objects.filter(user=owner)
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['owner'] = self._owner()
+        return context
+
+    def create(self, request, *args, **kwargs):
+        owner = self._owner()
+        if not owner:
+            return Response({'error': 'user_id or authentication required'}, status=status.HTTP_400_BAD_REQUEST)
+        if SavedResultFilter.objects.filter(user=owner).count() >= SavedResultFilter.MAX_PER_USER:
+            return Response(
+                {'error': f'You can save up to {SavedResultFilter.MAX_PER_USER} filters. Delete one first.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(user=owner)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
 class CompatibilityViewSet(viewsets.ReadOnlyModelViewSet):
@@ -3675,7 +3799,7 @@ class UserResultViewSet(viewsets.ModelViewSet):
     ordering = ['-created_at']
 
     def get_queryset(self):
-        return UserResult.objects.all()
+        return UserResult.objects.filter(user__is_disabled=False, result_user__is_disabled=False)
 
     def perform_create(self, serializer):
         serializer.save()
@@ -3722,8 +3846,8 @@ class UserResultViewSet(viewsets.ModelViewSet):
         tag = tag.lower()
 
         try:
-            user = User.objects.get(id=user_id)
-            result_user = User.objects.get(id=result_user_id)
+            user = User.objects.get(id=user_id, is_disabled=False)
+            result_user = User.objects.get(id=result_user_id, is_disabled=False)
         except User.DoesNotExist as e:
             return Response(
                 {'error': 'User not found'},
@@ -3767,7 +3891,9 @@ class UserResultViewSet(viewsets.ModelViewSet):
             # block the new like unless the liker has answered all of target's required questions.
             if tag == 'like' and getattr(result_user, 'require_answers_for_likes', False):
                 required_qids = set(
-                    UserRequiredQuestion.objects.filter(user=result_user).values_list('question_id', flat=True)
+                    UserRequiredQuestion.objects.filter(
+                        user=result_user, question__is_disabled=False,
+                    ).values_list('question_id', flat=True)
                 )
                 if required_qids:
                     answered_qids = set(
@@ -3836,7 +3962,7 @@ class UserResultViewSet(viewsets.ModelViewSet):
             )
 
         pairs = UserResult.objects.filter(
-            result_user_id=user_id
+            result_user_id=user_id, user__is_disabled=False,
         ).values_list('user_id', 'tag')
 
         tags_by_user = {}
@@ -3866,8 +3992,8 @@ class UserResultViewSet(viewsets.ModelViewSet):
             )
 
         try:
-            sender = User.objects.get(id=sender_id)
-            recipient = User.objects.get(id=recipient_id)
+            sender = User.objects.get(id=sender_id, is_disabled=False)
+            recipient = User.objects.get(id=recipient_id, is_disabled=False)
         except User.DoesNotExist:
             return Response(
                 {'error': 'User not found'},
@@ -4432,10 +4558,10 @@ class NotificationViewSet(viewsets.ModelViewSet):
         # For testing, allow user_id parameter
         user_id = self.request.query_params.get('user_id')
         if user_id:
-            return Notification.objects.filter(recipient_id=user_id)
+            return Notification.objects.filter(recipient_id=user_id).exclude(sender__is_disabled=True)
 
         if self.request.user.is_authenticated:
-            return Notification.objects.filter(recipient=self.request.user)
+            return Notification.objects.filter(recipient=self.request.user).exclude(sender__is_disabled=True)
         return Notification.objects.none()
 
     @action(detail=False, methods=['get'])
@@ -4443,9 +4569,13 @@ class NotificationViewSet(viewsets.ModelViewSet):
         """Get count of unread notifications"""
         user_id = request.query_params.get('user_id')
         if user_id:
-            count = Notification.objects.filter(recipient_id=user_id, is_read=False).count()
+            count = Notification.objects.filter(recipient_id=user_id, is_read=False).exclude(
+                sender__is_disabled=True
+            ).count()
         elif request.user.is_authenticated:
-            count = Notification.objects.filter(recipient=request.user, is_read=False).count()
+            count = Notification.objects.filter(recipient=request.user, is_read=False).exclude(
+                sender__is_disabled=True
+            ).count()
         else:
             count = 0
 
@@ -4493,7 +4623,7 @@ class NotificationViewSet(viewsets.ModelViewSet):
             return Response({'error': 'recipient_id is required'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            recipient = User.objects.get(id=recipient_id, is_banned=False)
+            recipient = User.objects.get(id=recipient_id, is_banned=False, is_disabled=False)
         except (User.DoesNotExist, DjangoValidationError, ValueError):
             return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
         if recipient.id == sender.id:
@@ -4598,7 +4728,9 @@ class ConversationViewSet(viewsets.ModelViewSet):
             Q(participant1__is_admin=True) | Q(participant2__is_admin=True)
         )
 
-        return (matched_conversations | admin_conversations).distinct()
+        return (matched_conversations | admin_conversations).exclude(
+            Q(participant1__is_disabled=True) | Q(participant2__is_disabled=True)
+        ).distinct()
 
     def get_serializer_context(self):
         """Add user_id to serializer context"""
@@ -4999,6 +5131,8 @@ class ConversationViewSet(viewsets.ModelViewSet):
 def _resolve_viewer(request):
     """Return (viewer_user, viewer_id_str) using session OR ?user_id query/body fallback."""
     if request.user.is_authenticated:
+        if request.user.is_disabled:
+            return None, None
         return request.user, str(request.user.id)
     user_id = request.query_params.get('user_id') if hasattr(request, 'query_params') else None
     if not user_id and request.method != 'GET':
@@ -5008,7 +5142,7 @@ def _resolve_viewer(request):
             user_id = None
     if user_id:
         try:
-            u = User.objects.get(id=user_id)
+            u = User.objects.get(id=user_id, is_disabled=False)
             return u, str(u.id)
         except User.DoesNotExist:
             return None, None
@@ -5021,16 +5155,17 @@ def _resolve_audience_user_ids(viewer, audience: str):
     Note: only the 'all' audience includes the viewer themselves. The other filters
     show ONLY the people in that relationship group, not the viewer's own content.
     """
+    my_results = UserResult.objects.filter(user=viewer, result_user__is_disabled=False)
     if audience == 'matches':
-        my_likes = set(UserResult.objects.filter(user=viewer, tag='like').values_list('result_user_id', flat=True))
+        my_likes = set(my_results.filter(tag='like').values_list('result_user_id', flat=True))
         likes_me = set(UserResult.objects.filter(result_user=viewer, tag='like').values_list('user_id', flat=True))
         return list(my_likes & likes_me)
     if audience == 'approved':
-        return list(UserResult.objects.filter(user=viewer, tag='approve').values_list('result_user_id', flat=True))
+        return list(my_results.filter(tag='approve').values_list('result_user_id', flat=True))
     if audience == 'liked':
-        return list(UserResult.objects.filter(user=viewer, tag='like').values_list('result_user_id', flat=True))
+        return list(my_results.filter(tag='like').values_list('result_user_id', flat=True))
     # 'all' or unknown — everyone (including viewer)
-    return list(User.objects.filter(is_banned=False).values_list('id', flat=True))
+    return list(User.objects.filter(is_banned=False, is_disabled=False).values_list('id', flat=True))
 
 
 def _sync_post_hashtags(post, body):
@@ -5461,7 +5596,7 @@ def _feed_people_matching(allowed_ids, q):
         name_q |= Q(first_name__icontains=first, last_name__icontains=rest.strip())
 
     candidates = list(
-        User.objects.filter(id__in=allowed_ids, is_banned=False)
+        User.objects.filter(id__in=allowed_ids, is_banned=False, is_disabled=False)
         .filter(name_q)
         .only('id', 'username', 'first_name', 'last_name', 'profile_photo')[:200]
     )
@@ -5511,7 +5646,9 @@ class FeedView(viewsets.ViewSet):
 
         audience_ids = _resolve_audience_user_ids(viewer, audience)
         if author_id:
-            content_ids = list(User.objects.filter(id=author_id, is_banned=False).values_list('id', flat=True))
+            content_ids = list(
+                User.objects.filter(id=author_id, is_banned=False, is_disabled=False).values_list('id', flat=True)
+            )
         else:
             content_ids = audience_ids
         if not content_ids:
