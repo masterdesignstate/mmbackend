@@ -1220,6 +1220,9 @@ class UserViewSet(viewsets.ModelViewSet):
                         Q(user1=request.user) | Q(user2=request.user)
                     ).select_related('user1', 'user2').annotate(**annotate_kwargs).order_by('-their_completeness', '-compatibility_score', 'id')
             else:
+                # Rank by the score the card shows. Completeness used to come first, so a
+                # 72% match who had skipped some required questions landed behind everyone
+                # at 60% who had answered all of them, and widening the filter hid them.
                 compatibilities = Compatibility.objects.filter(
                     Q(user1=request.user) | Q(user2=request.user)
                 ).select_related('user1', 'user2').annotate(
@@ -1229,14 +1232,7 @@ class UserViewSet(viewsets.ModelViewSet):
                         default='user1__id'
                     ),
                     compatibility_score=compatibility_score_expression,
-                    # Get the completeness from the correct direction
-                    # This is: what % of MY required questions did THEY answer?
-                    their_completeness=Case(
-                        When(user1=request.user, then='user2_required_completeness'),
-                        default='user1_required_completeness',
-                        output_field=FloatField()
-                    )
-                ).order_by('-their_completeness', '-compatibility_score', 'id')
+                ).order_by('-compatibility_score', 'id')
 
             compatibilities = compatibilities.exclude(
                 Q(user1=request.user, user2__is_disabled=True) |

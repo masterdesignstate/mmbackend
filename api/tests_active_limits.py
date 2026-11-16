@@ -155,6 +155,40 @@ class DisabledUserVisibilityTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
 
+class CompatibilityRankTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        # Seeded mandatory questions would drop these answerless accounts.
+        Question.objects.update(is_mandatory=False)
+        self.viewer = _user('rankviewer')
+        self.high = _user('highscore', age=22)
+        self.complete = _user('complete', age=22)
+        Compatibility.objects.create(
+            user1=self.viewer,
+            user2=self.high,
+            overall_compatibility=72.45,
+            user2_required_completeness=0.567,
+        )
+        Compatibility.objects.create(
+            user1=self.viewer,
+            user2=self.complete,
+            overall_compatibility=65.78,
+            user2_required_completeness=1,
+        )
+
+    def test_higher_score_outranks_someone_who_answered_more_required_questions(self):
+        response = APIClient().get('/api/users/compatible/', {
+            'user_id': str(self.viewer.id),
+            'min_compatibility': 49,
+            'max_compatibility': 100,
+            'min_age': 18,
+            'max_age': 29,
+        })
+        self.assertEqual(response.status_code, 200, response.data)
+        names = [row['user']['username'] for row in response.data['results']]
+        self.assertEqual(names[:2], ['highscore', 'complete'])
+
+
 class SavedResultFilterTests(TestCase):
     def setUp(self):
         self.user = _user('filterer')
