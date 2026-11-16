@@ -1220,6 +1220,8 @@ class UserViewSet(viewsets.ModelViewSet):
                         Q(user1=request.user) | Q(user2=request.user)
                     ).select_related('user1', 'user2').annotate(**annotate_kwargs).order_by('-their_completeness', '-compatibility_score', 'id')
             else:
+                # Required toggle is off, so rank by the compatibility percentage on the card.
+                # Completeness only orders the list when that toggle is on.
                 compatibilities = Compatibility.objects.filter(
                     Q(user1=request.user) | Q(user2=request.user)
                 ).select_related('user1', 'user2').annotate(
@@ -1229,14 +1231,7 @@ class UserViewSet(viewsets.ModelViewSet):
                         default='user1__id'
                     ),
                     compatibility_score=compatibility_score_expression,
-                    # Get the completeness from the correct direction
-                    # This is: what % of MY required questions did THEY answer?
-                    their_completeness=Case(
-                        When(user1=request.user, then='user2_required_completeness'),
-                        default='user1_required_completeness',
-                        output_field=FloatField()
-                    )
-                ).order_by('-their_completeness', '-compatibility_score', 'id')
+                ).order_by('-compatibility_score', 'id')
 
             compatibilities = compatibilities.exclude(
                 Q(user1=request.user, user2__is_disabled=True) |
