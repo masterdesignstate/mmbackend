@@ -189,6 +189,65 @@ class CompatibilityRankTests(TestCase):
         self.assertEqual(names[:2], ['highscore', 'complete'])
 
 
+class TwoWayExclusionTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        Question.objects.update(is_mandatory=False)
+
+    def _pair(self, left, right, **scores):
+        return Compatibility.objects.create(
+            user1=left,
+            user2=right,
+            overall_compatibility=scores.get('overall', 80),
+            compatible_with_me=scores.get('mine', 80),
+            im_compatible_with=scores.get('theirs', 80),
+        )
+
+    def _names(self, user, **params):
+        response = APIClient().get('/api/users/compatible/', {'user_id': str(user.id), **params})
+        self.assertEqual(response.status_code, 200, response.data)
+        return [row['user']['username'] for row in response.data['results']]
+
+    def test_age_range_hides_both_people(self):
+        young = _user('youngside', age=22)
+        old = _user('oldside', age=30)
+        young.live = 'Austin'
+        young.results_filters = {'age': {'min': 18, 'max': 25}}
+        young.save(update_fields=['live', 'results_filters'])
+        old.live = 'Georgetown'
+        old.save(update_fields=['live'])
+        self._pair(young, old)
+
+        self.assertNotIn('youngside', self._names(old))
+        self.assertNotIn('oldside', self._names(young, min_age=18, max_age=25))
+
+    def test_question_exclusion_hides_both_people(self):
+        question = Question.objects.create(text='Sample preference', is_mandatory=False, is_approved=True)
+        chooser = _user('chooser', age=25)
+        chosen = _user('chosen', age=25)
+        UserAnswer.objects.create(
+            user=chooser, question=question, me_answer=1, looking_for_answer=1,
+            excluded_answer_values=[5],
+        )
+        UserAnswer.objects.create(
+            user=chosen, question=question, me_answer=5, looking_for_answer=1,
+        )
+        self._pair(chooser, chosen)
+
+        self.assertNotIn('chosen', self._names(chooser))
+        self.assertNotIn('chooser', self._names(chosen))
+
+    def test_tags_and_required_only_stay_one_way(self):
+        picker = _user('picker', age=25)
+        other = _user('other', age=25)
+        picker.results_filters = {'tags': ['Liked'], 'requiredOnly': True}
+        picker.save(update_fields=['results_filters'])
+        self._pair(picker, other)
+
+        self.assertIn('picker', self._names(other))
+        self.assertIn('other', self._names(picker))
+
+
 class SavedResultFilterTests(TestCase):
     def setUp(self):
         self.user = _user('filterer')

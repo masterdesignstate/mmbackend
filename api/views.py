@@ -279,6 +279,108 @@ def _apply_importance_exclusions(compatibilities, current_user):
     )
 
 
+def _saved_filter_range(filters, key, default_min, default_max):
+    """A saved Results range. A missing filter is the default, which hides nobody inside it."""
+    if not isinstance(filters, dict):
+        return default_min, default_max
+    raw = filters.get(key)
+    if not isinstance(raw, dict):
+        return default_min, default_max
+    try:
+        return int(raw.get('min', default_min)), int(raw.get('max', default_max))
+    except (TypeError, ValueError):
+        return default_min, default_max
+
+
+def _score_from_others_perspective(comp, other_is_user1, compatibility_type):
+    """The compatibility number the other person filtered on."""
+    if compatibility_type == 'compatible_with_me':
+        value = comp.compatible_with_me if other_is_user1 else comp.im_compatible_with
+    elif compatibility_type == 'im_compatible_with':
+        value = comp.im_compatible_with if other_is_user1 else comp.compatible_with_me
+    else:
+        value = comp.overall_compatibility
+    if value is None:
+        return None
+    return float(value)
+
+
+def _outside(value, bounds):
+    low, high = bounds
+    return value < low or value > high
+
+
+def _two_way_hidden_user_ids(viewer, min_distance, max_distance):
+    """People who should disappear from this viewer's Results.
+
+    The viewer's own distance request is applied here because distance used to be
+    checked only in the browser, after a page was already chosen. Age, compatibility,
+    distance, and question exclusions are also applied in reverse: if the other
+    person's applied filters would hide the viewer, the viewer does not see them
+    either. Tags, required questions, and importance exclusions stay one-way.
+    """
+    from .city_distances import distance_between
+
+    hidden = set()
+    if min_distance is None and max_distance is None:
+        viewer_distance = None
+    else:
+        viewer_distance = (
+            1 if min_distance is None else min_distance,
+            100 if max_distance is None else max_distance,
+        )
+
+    pairs = Compatibility.objects.filter(
+        Q(user1=viewer) | Q(user2=viewer)
+    ).select_related('user1', 'user2')
+    for comp in pairs:
+        other = comp.user2 if comp.user1_id == viewer.id else comp.user1
+        filters = other.results_filters or {}
+        if viewer.age is not None and _outside(viewer.age, _saved_filter_range(filters, 'age', 18, 80)):
+            hidden.add(other.id)
+            continue
+
+        compatibility_type = filters.get('compatibilityType') or 'overall'
+        if compatibility_type not in ('overall', 'compatible_with_me', 'im_compatible_with'):
+            compatibility_type = 'overall'
+        score = _score_from_others_perspective(comp, comp.user1_id == other.id, compatibility_type)
+        if score is not None and _outside(score, _saved_filter_range(filters, 'compatibility', 0, 100)):
+            hidden.add(other.id)
+            continue
+
+        miles = distance_between(viewer.live, other.live)
+        if miles is None:
+            continue
+        if _outside(miles, _saved_filter_range(filters, 'distance', 1, 100)):
+            hidden.add(other.id)
+            continue
+        if viewer_distance is not None and _outside(miles, viewer_distance):
+            hidden.add(other.id)
+
+    viewer_answers = {
+        question_id: me_answer
+        for question_id, me_answer in UserAnswer.objects.filter(
+            user=viewer, question__is_disabled=False,
+        ).values_list('question_id', 'me_answer')
+        if me_answer is not None
+    }
+    if viewer_answers:
+        rows = UserAnswer.objects.exclude(user=viewer).filter(
+            question_id__in=viewer_answers.keys(),
+            question__is_disabled=False,
+        ).values_list('user_id', 'question_id', 'excluded_answer_values')
+        for user_id, question_id, excluded in rows:
+            if not excluded:
+                continue
+            try:
+                excluded_values = {int(value) for value in excluded}
+            except (TypeError, ValueError):
+                continue
+            if viewer_answers.get(question_id) in excluded_values:
+                hidden.add(user_id)
+    return hidden
+
+
 def _restriction_expires_at(restriction_type, restriction_date, restriction_duration):
     if restriction_type != 'temporary' or not restriction_date or restriction_duration is None:
         return None
@@ -1460,6 +1562,12 @@ class UserViewSet(viewsets.ModelViewSet):
 
             compatibilities = _apply_answer_exclusions(compatibilities, request.user)
             compatibilities = _apply_importance_exclusions(compatibilities, request.user)
+            hidden_ids = _two_way_hidden_user_ids(request.user, min_distance, max_distance)
+            if hidden_ids:
+                compatibilities = compatibilities.exclude(
+                    Q(user1=request.user, user2_id__in=hidden_ids) |
+                    Q(user2=request.user, user1_id__in=hidden_ids)
+                )
 
             if apply_required_filter:
                 print(f"🔍 [required] ENTERING required_filter path: required_scope={required_scope!r}")
