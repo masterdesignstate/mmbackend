@@ -381,6 +381,36 @@ def _two_way_hidden_user_ids(viewer, min_distance, max_distance):
     return hidden
 
 
+def _exclude_users_from_results(compatibilities, viewer, user_ids):
+    """Drop these people from a viewer's Results.
+
+    The ids are a concrete list on purpose. A subquery inside exclude(Q | Q) can be
+    planned so the page LIMIT runs before those people drop out, which leaves a short
+    page and an empty slot.
+    """
+    user_ids = list(user_ids)
+    if not user_ids:
+        return compatibilities
+    return compatibilities.exclude(
+        Q(user1=viewer, user2_id__in=user_ids) |
+        Q(user2=viewer, user1_id__in=user_ids)
+    )
+
+
+def _exclude_incomplete_onboarding(compatibilities, viewer):
+    mandatory_count = Question.objects.filter(is_mandatory=True).values('question_number').distinct().count()
+    if mandatory_count <= 0:
+        return compatibilities
+    incomplete_user_ids = User.objects.annotate(
+        mandatory_answered=Count(
+            'answers__question__question_number',
+            filter=Q(answers__question__is_mandatory=True),
+            distinct=True,
+        )
+    ).filter(mandatory_answered__lt=mandatory_count).values_list('id', flat=True)
+    return _exclude_users_from_results(compatibilities, viewer, incomplete_user_ids)
+
+
 def _restriction_expires_at(restriction_type, restriction_date, restriction_duration):
     if restriction_type != 'temporary' or not restriction_date or restriction_duration is None:
         return None
@@ -1513,10 +1543,10 @@ class UserViewSet(viewsets.ModelViewSet):
                     tag='hide'
                 ).values_list('result_user_id', flat=True)
 
+                hidden_user_ids = list(hidden_user_ids)
                 if hidden_user_ids:
-                    # Exclude hidden users from compatibilities
-                    compatibilities = compatibilities.exclude(
-                        Q(user1__id__in=hidden_user_ids) | Q(user2__id__in=hidden_user_ids)
+                    compatibilities = _exclude_users_from_results(
+                        compatibilities, request.user, hidden_user_ids,
                     )
                     print(f"🚫 Excluded {len(hidden_user_ids)} hidden users from results")
 
@@ -1563,11 +1593,7 @@ class UserViewSet(viewsets.ModelViewSet):
             compatibilities = _apply_answer_exclusions(compatibilities, request.user)
             compatibilities = _apply_importance_exclusions(compatibilities, request.user)
             hidden_ids = _two_way_hidden_user_ids(request.user, min_distance, max_distance)
-            if hidden_ids:
-                compatibilities = compatibilities.exclude(
-                    Q(user1=request.user, user2_id__in=hidden_ids) |
-                    Q(user2=request.user, user1_id__in=hidden_ids)
-                )
+            compatibilities = _exclude_users_from_results(compatibilities, request.user, hidden_ids)
 
             if apply_required_filter:
                 print(f"🔍 [required] ENTERING required_filter path: required_scope={required_scope!r}")
@@ -1578,21 +1604,7 @@ class UserViewSet(viewsets.ModelViewSet):
                     Q(user2=request.user, user1__is_banned=True)
                 )
 
-                # Filter out users who haven't completed mandatory onboarding
-                mandatory_count = Question.objects.filter(is_mandatory=True).values('question_number').distinct().count()
-                if mandatory_count > 0:
-                    from django.db.models import Count
-                    incomplete_user_ids = User.objects.annotate(
-                        mandatory_answered=Count(
-                            'answers__question__question_number',
-                            filter=Q(answers__question__is_mandatory=True),
-                            distinct=True
-                        )
-                    ).filter(mandatory_answered__lt=mandatory_count).values_list('id', flat=True)
-                    compatibilities = compatibilities.exclude(
-                        Q(user1=request.user, user2__id__in=incomplete_user_ids) |
-                        Q(user2=request.user, user1__id__in=incomplete_user_ids)
-                    )
+                compatibilities = _exclude_incomplete_onboarding(compatibilities, request.user)
 
                 compatibility_results = []
 
@@ -1934,20 +1946,7 @@ class UserViewSet(viewsets.ModelViewSet):
                 Q(user2=request.user, user1__is_banned=True)
             )
 
-            # Filter out users who haven't completed mandatory onboarding
-            mandatory_count = Question.objects.filter(is_mandatory=True).values('question_number').distinct().count()
-            if mandatory_count > 0:
-                incomplete_user_ids = User.objects.annotate(
-                    mandatory_answered=Count(
-                        'answers__question__question_number',
-                        filter=Q(answers__question__is_mandatory=True),
-                        distinct=True
-                    )
-                ).filter(mandatory_answered__lt=mandatory_count).values_list('id', flat=True)
-                compatibilities = compatibilities.exclude(
-                    Q(user1=request.user, user2__id__in=incomplete_user_ids) |
-                    Q(user2=request.user, user1__id__in=incomplete_user_ids)
-                )
+            compatibilities = _exclude_incomplete_onboarding(compatibilities, request.user)
 
             total_compatibilities = compatibilities.count()
 

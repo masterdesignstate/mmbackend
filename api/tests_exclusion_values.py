@@ -274,3 +274,61 @@ class AnswerExclusionPageTests(TestCase):
 
         self.assertEqual(len(page), 2)
         self.assertEqual([row.user2_id for row in page], [others[0].id, others[2].id])
+
+    def test_compatible_page_stays_full_when_someone_is_excluded(self):
+        from django.core.cache import cache
+        from rest_framework.test import APIClient
+
+        cache.clear()
+        Question.objects.update(is_mandatory=False)
+        question = Question.objects.create(
+            question_number=mq.POLITICS,
+            question_name='Politics',
+            group_name='Test',
+            text='Politics',
+            is_approved=True,
+        )
+        for index, value in enumerate([1, 2, 3, 4, 5]):
+            QuestionAnswer.objects.create(
+                question=question, value=str(value), answer_text=str(value), order=index,
+            )
+        viewer = User.objects.create_user(username='pageviewer', email='pageviewer@example.com', password='password')
+        UserAnswer.objects.create(
+            user=viewer, question=question, me_answer=3, looking_for_answer=3,
+            excluded_answer_values=[5],
+        )
+        kept = []
+        for index, score in enumerate((90, 80, 70, 60)):
+            other = User.objects.create_user(
+                username=f'pagecandidate{index}',
+                email=f'pagecandidate{index}@example.com',
+                password='password',
+                age=25,
+            )
+            UserAnswer.objects.create(
+                user=other,
+                question=question,
+                me_answer=5 if index == 1 else 3,
+                looking_for_answer=3,
+            )
+            Compatibility.objects.create(
+                user1=viewer,
+                user2=other,
+                overall_compatibility=score,
+                compatible_with_me=score,
+                im_compatible_with=score,
+                mutual_questions_count=1,
+            )
+            if index != 1:
+                kept.append(other.username)
+
+        response = APIClient().get('/api/users/compatible/', {
+            'user_id': str(viewer.id),
+            'page': 1,
+            'page_size': 3,
+        })
+        self.assertEqual(response.status_code, 200, response.data)
+        names = [row['user']['username'] for row in response.data['results']]
+        self.assertEqual(len(names), 3)
+        self.assertEqual(names, kept)
+        self.assertNotIn('pagecandidate1', names)
